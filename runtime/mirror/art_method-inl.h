@@ -73,12 +73,6 @@ inline ObjectArray<Class>* ArtMethod::GetDexCacheResolvedTypes() const {
       OFFSET_OF_OBJECT_MEMBER(ArtMethod, dex_cache_resolved_types_), false);
 }
 
-inline ObjectArray<StaticStorageBase>* ArtMethod::GetDexCacheInitializedStaticStorage() const {
-  return GetFieldObject<ObjectArray<StaticStorageBase>*>(
-      OFFSET_OF_OBJECT_MEMBER(ArtMethod, dex_cache_initialized_static_storage_),
-      false);
-}
-
 inline uint32_t ArtMethod::GetCodeSize() const {
   DCHECK(!IsRuntimeMethod() && !IsProxyMethod()) << PrettyMethod(this);
   uintptr_t code = reinterpret_cast<uintptr_t>(GetEntryPointFromCompiledCode());
@@ -199,6 +193,13 @@ inline bool ArtMethod::IsCalleeSaveMethod() const {
 inline bool ArtMethod::IsResolutionMethod() const {
   bool result = this == Runtime::Current()->GetResolutionMethod();
   // Check that if we do think it is phony it looks like the resolution method.
+  DCHECK(!result || IsRuntimeMethod());
+  return result;
+}
+
+inline bool ArtMethod::IsImtConflictMethod() const {
+  bool result = this == Runtime::Current()->GetImtConflictMethod();
+  // Check that if we do think it is phony it looks like the imt conflict method.
   DCHECK(!result || IsRuntimeMethod());
   return result;
 }

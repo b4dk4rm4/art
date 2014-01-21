@@ -19,6 +19,7 @@
 
 #include "class.h"
 #include "gtest/gtest.h"
+#include "root_visitor.h"
 
 namespace art {
 
@@ -44,6 +45,7 @@ class MANAGED String : public Object {
   }
 
   const CharArray* GetCharArray() const;
+  CharArray* GetCharArray();
 
   int32_t GetOffset() const {
     int32_t result = GetField32(OffsetOffset(), false);
@@ -74,12 +76,6 @@ class MANAGED String : public Object {
 
   static String* AllocFromModifiedUtf8(Thread* self, int32_t utf16_length,
                                        const char* utf8_data_in)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  static String* Alloc(Thread* self, Class* java_lang_String, int32_t utf16_length)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  static String* Alloc(Thread* self, Class* java_lang_String, CharArray* array)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   bool Equals(const char* modified_utf8) const
@@ -113,13 +109,13 @@ class MANAGED String : public Object {
 
   static void SetClass(Class* java_lang_String);
   static void ResetClass();
+  static void VisitRoots(RootVisitor* visitor, void* arg)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
  private:
   void SetHashCode(int32_t new_hash_code) {
-    DCHECK_EQ(0u,
-              GetField32(OFFSET_OF_OBJECT_MEMBER(String, hash_code_), false));
-    SetField32(OFFSET_OF_OBJECT_MEMBER(String, hash_code_),
-               new_hash_code, false);
+    DCHECK_EQ(0u, GetField32(OFFSET_OF_OBJECT_MEMBER(String, hash_code_), false));
+    SetField32(OFFSET_OF_OBJECT_MEMBER(String, hash_code_), new_hash_code, false);
   }
 
   void SetCount(int32_t new_count) {
@@ -132,6 +128,12 @@ class MANAGED String : public Object {
     DCHECK_GE(GetLength(), new_offset);
     SetField32(OFFSET_OF_OBJECT_MEMBER(String, offset_), new_offset, false);
   }
+
+  static String* Alloc(Thread* self, int32_t utf16_length)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  static String* Alloc(Thread* self, const SirtRef<CharArray>& array)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   void SetArray(CharArray* new_array) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -155,8 +157,8 @@ class MANAGED StringClass : public Class {
  private:
   CharArray* ASCII_;
   Object* CASE_INSENSITIVE_ORDER_;
-  int64_t serialVersionUID_;
   uint32_t REPLACEMENT_CHAR_;
+  int64_t serialVersionUID_;
   friend struct art::StringClassOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(StringClass);
 };

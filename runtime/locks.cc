@@ -22,6 +22,7 @@ namespace art {
 
 Mutex* Locks::abort_lock_ = NULL;
 Mutex* Locks::breakpoint_lock_ = NULL;
+Mutex* Locks::deoptimization_lock_ = NULL;
 ReaderWriterMutex* Locks::classlinker_classes_lock_ = NULL;
 ReaderWriterMutex* Locks::heap_bitmap_lock_ = NULL;
 Mutex* Locks::logging_lock_ = NULL;
@@ -30,6 +31,7 @@ Mutex* Locks::runtime_shutdown_lock_ = NULL;
 Mutex* Locks::thread_list_lock_ = NULL;
 Mutex* Locks::thread_suspend_count_lock_ = NULL;
 Mutex* Locks::trace_lock_ = NULL;
+Mutex* Locks::profiler_lock_ = NULL;
 Mutex* Locks::unexpected_signal_lock_ = NULL;
 
 void Locks::Init() {
@@ -37,6 +39,7 @@ void Locks::Init() {
     // Already initialized.
     DCHECK(abort_lock_ != NULL);
     DCHECK(breakpoint_lock_ != NULL);
+    DCHECK(deoptimization_lock_ != NULL);
     DCHECK(classlinker_classes_lock_ != NULL);
     DCHECK(heap_bitmap_lock_ != NULL);
     DCHECK(logging_lock_ != NULL);
@@ -44,6 +47,7 @@ void Locks::Init() {
     DCHECK(thread_list_lock_ != NULL);
     DCHECK(thread_suspend_count_lock_ != NULL);
     DCHECK(trace_lock_ != NULL);
+    DCHECK(profiler_lock_ != NULL);
     DCHECK(unexpected_signal_lock_ != NULL);
   } else {
     logging_lock_ = new Mutex("logging lock", kLoggingLock, true);
@@ -51,6 +55,8 @@ void Locks::Init() {
 
     DCHECK(breakpoint_lock_ == NULL);
     breakpoint_lock_ = new Mutex("breakpoint lock", kBreakpointLock);
+    DCHECK(deoptimization_lock_ == NULL);
+    deoptimization_lock_ = new Mutex("deoptimization lock", kDeoptimizationLock);
     DCHECK(classlinker_classes_lock_ == NULL);
     classlinker_classes_lock_ = new ReaderWriterMutex("ClassLinker classes lock",
                                                       kClassLinkerClassesLock);
@@ -66,6 +72,8 @@ void Locks::Init() {
     thread_suspend_count_lock_ = new Mutex("thread suspend count lock", kThreadSuspendCountLock);
     DCHECK(trace_lock_ == NULL);
     trace_lock_ = new Mutex("trace lock", kTraceLock);
+    DCHECK(profiler_lock_ == NULL);
+    profiler_lock_ = new Mutex("profiler lock", kProfilerLock);
     DCHECK(unexpected_signal_lock_ == NULL);
     unexpected_signal_lock_ = new Mutex("unexpected signal lock", kUnexpectedSignalLock, true);
   }

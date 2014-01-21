@@ -35,7 +35,8 @@
 #include "ScopedLocalRef.h"
 #include "ScopedPrimitiveArray.h"
 #include "ScopedUtfChars.h"
-#include "thread.h"
+#include "thread-inl.h"
+#include "utils.h"
 
 #if defined(HAVE_PRCTL)
 #include <sys/prctl.h>
@@ -230,18 +231,18 @@ static void DropCapabilitiesBoundingSet() {
 
 static void SetCapabilities(int64_t permitted, int64_t effective) {
   __user_cap_header_struct capheader;
-  __user_cap_data_struct capdata;
-
   memset(&capheader, 0, sizeof(capheader));
-  memset(&capdata, 0, sizeof(capdata));
-
-  capheader.version = _LINUX_CAPABILITY_VERSION;
+  capheader.version = _LINUX_CAPABILITY_VERSION_3;
   capheader.pid = 0;
 
-  capdata.effective = effective;
-  capdata.permitted = permitted;
+  __user_cap_data_struct capdata[2];
+  memset(&capdata, 0, sizeof(capdata));
+  capdata[0].effective = effective;
+  capdata[1].effective = effective >> 32;
+  capdata[0].permitted = permitted;
+  capdata[1].permitted = permitted >> 32;
 
-  if (capset(&capheader, &capdata) != 0) {
+  if (capset(&capheader, &capdata[0]) == -1) {
     PLOG(FATAL) << "capset(" << permitted << ", " << effective << ") failed";
   }
 }
@@ -350,13 +351,14 @@ static bool MountEmulatedStorage(uid_t uid, jint mount_mode) {
 
     if (mount_mode == MOUNT_EXTERNAL_MULTIUSER_ALL) {
       // Mount entire external storage tree for all users
-      if (mount(source, target, NULL, MS_BIND, NULL) == -1) {
+      if (TEMP_FAILURE_RETRY(mount(source, target, NULL, MS_BIND, NULL)) == -1) {
         PLOG(WARNING) << "Failed to mount " << source << " to " << target;
         return false;
       }
     } else {
       // Only mount user-specific external storage
-      if (mount(source_user.c_str(), target_user.c_str(), NULL, MS_BIND, NULL) == -1) {
+      if (TEMP_FAILURE_RETRY(
+              mount(source_user.c_str(), target_user.c_str(), NULL, MS_BIND, NULL)) == -1) {
         PLOG(WARNING) << "Failed to mount " << source_user << " to " << target_user;
         return false;
       }
@@ -367,7 +369,8 @@ static bool MountEmulatedStorage(uid_t uid, jint mount_mode) {
     }
 
     // Finally, mount user-specific path into place for legacy users
-    if (mount(target_user.c_str(), legacy, NULL, MS_BIND | MS_REC, NULL) == -1) {
+    if (TEMP_FAILURE_RETRY(
+            mount(target_user.c_str(), legacy, NULL, MS_BIND | MS_REC, NULL)) == -1) {
       PLOG(WARNING) << "Failed to mount " << target_user << " to " << legacy;
       return false;
     }
@@ -406,7 +409,8 @@ static pid_t ForkAndSpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArra
                                      jint debug_flags, jobjectArray javaRlimits,
                                      jlong permittedCapabilities, jlong effectiveCapabilities,
                                      jint mount_external,
-                                     jstring java_se_info, jstring java_se_name, bool is_system_server) {
+                                     jstring java_se_info, jstring java_se_name,
+                                     bool is_system_server) {
   Runtime* runtime = Runtime::Current();
   CHECK(runtime->IsZygote()) << "runtime instance not started with -Xzygote";
   if (!runtime->PreZygoteFork()) {
@@ -496,6 +500,15 @@ static pid_t ForkAndSpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArra
                     << (is_system_server ? "true" : "false") << ", "
                     << "\"" << se_info_c_str << "\", \"" << se_name_c_str << "\") failed";
       }
+
+      // Make it easier to debug audit logs by setting the main thread's name to the
+      // nice name rather than "app_process".
+      if (se_info_c_str == NULL && is_system_server) {
+        se_name_c_str = "system_server";
+      }
+      if (se_info_c_str != NULL) {
+        SetThreadName(se_name_c_str);
+      }
     }
 #else
     UNUSED(is_system_server);
@@ -517,14 +530,16 @@ static pid_t ForkAndSpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArra
 }
 
 static jint Zygote_nativeForkAndSpecialize(JNIEnv* env, jclass, jint uid, jint gid, jintArray gids,
-                                           jint debug_flags, jobjectArray rlimits, jint mount_external,
-                                           jstring se_info, jstring se_name) {
-  return ForkAndSpecializeCommon(env, uid, gid, gids, debug_flags, rlimits, 0, 0, mount_external, se_info, se_name, false);
+                                           jint debug_flags, jobjectArray rlimits,
+                                           jint mount_external, jstring se_info, jstring se_name) {
+  return ForkAndSpecializeCommon(env, uid, gid, gids, debug_flags, rlimits, 0, 0, mount_external,
+                                 se_info, se_name, false);
 }
 
 static jint Zygote_nativeForkSystemServer(JNIEnv* env, jclass, uid_t uid, gid_t gid, jintArray gids,
                                           jint debug_flags, jobjectArray rlimits,
-                                          jlong permittedCapabilities, jlong effectiveCapabilities) {
+                                          jlong permittedCapabilities,
+                                          jlong effectiveCapabilities) {
   pid_t pid = ForkAndSpecializeCommon(env, uid, gid, gids,
                                       debug_flags, rlimits,
                                       permittedCapabilities, effectiveCapabilities,

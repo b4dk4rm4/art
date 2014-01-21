@@ -93,7 +93,7 @@ LIR* MipsMir2Lir::LoadConstantNoClobber(int r_dest, int value) {
   } else if ((value < 0) && (value >= -32768)) {
     res = NewLIR3(kMipsAddiu, r_dest, r_ZERO, value);
   } else {
-    res = NewLIR2(kMipsLui, r_dest, value>>16);
+    res = NewLIR2(kMipsLui, r_dest, value >> 16);
     if (value & 0xffff)
       NewLIR3(kMipsOri, r_dest, r_dest, value);
   }
@@ -325,6 +325,11 @@ LIR* MipsMir2Lir::OpRegReg(OpKind op, int r_dest_src1, int r_src2) {
   return NewLIR2(opcode, r_dest_src1, r_src2);
 }
 
+LIR* MipsMir2Lir::OpCondRegReg(OpKind op, ConditionCode cc, int r_dest, int r_src) {
+  LOG(FATAL) << "Unexpected use of OpCondRegReg for MIPS";
+  return NULL;
+}
+
 LIR* MipsMir2Lir::LoadConstantWide(int r_dest_lo, int r_dest_hi, int64_t value) {
   LIR *res;
   res = LoadConstantNoClobber(r_dest_lo, Low32Bits(value));
@@ -504,13 +509,13 @@ LIR* MipsMir2Lir::LoadBaseDispBody(int rBase, int displacement, int r_dest,
     }
   } else {
     if (pair) {
-      int r_tmp = AllocFreeTemp();
+      int r_tmp = AllocTemp();
       res = OpRegRegImm(kOpAdd, r_tmp, rBase, displacement);
       load = NewLIR3(opcode, r_dest, LOWORD_OFFSET, r_tmp);
       load2 = NewLIR3(opcode, r_dest_hi, HIWORD_OFFSET, r_tmp);
       FreeTemp(r_tmp);
     } else {
-      int r_tmp = (rBase == r_dest) ? AllocFreeTemp() : r_dest;
+      int r_tmp = (rBase == r_dest) ? AllocTemp() : r_dest;
       res = OpRegRegImm(kOpAdd, r_tmp, rBase, displacement);
       load = NewLIR3(opcode, r_dest, 0, r_tmp);
       if (r_tmp != r_dest)

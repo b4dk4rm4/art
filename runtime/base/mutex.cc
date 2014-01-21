@@ -21,8 +21,6 @@
 
 #include "atomic.h"
 #include "base/logging.h"
-#include "cutils/atomic.h"
-#include "cutils/atomic-inline.h"
 #include "mutex-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change.h"
@@ -30,54 +28,6 @@
 #include "utils.h"
 
 namespace art {
-
-#if defined(__APPLE__)
-
-// This works on Mac OS 10.6 but hasn't been tested on older releases.
-struct __attribute__((__may_alias__)) darwin_pthread_mutex_t {
-  long padding0;  // NOLINT(runtime/int) exact match to darwin type
-  int padding1;
-  uint32_t padding2;
-  int16_t padding3;
-  int16_t padding4;
-  uint32_t padding5;
-  pthread_t darwin_pthread_mutex_owner;
-  // ...other stuff we don't care about.
-};
-
-struct __attribute__((__may_alias__)) darwin_pthread_rwlock_t {
-  long padding0;  // NOLINT(runtime/int) exact match to darwin type
-  pthread_mutex_t padding1;
-  int padding2;
-  pthread_cond_t padding3;
-  pthread_cond_t padding4;
-  int padding5;
-  int padding6;
-  pthread_t darwin_pthread_rwlock_owner;
-  // ...other stuff we don't care about.
-};
-
-#endif  // __APPLE__
-
-#if defined(__GLIBC__)
-
-struct __attribute__((__may_alias__)) glibc_pthread_mutex_t {
-  int32_t padding0[2];
-  int owner;
-  // ...other stuff we don't care about.
-};
-
-struct __attribute__((__may_alias__)) glibc_pthread_rwlock_t {
-#ifdef __LP64__
-  int32_t padding0[6];
-#else
-  int32_t padding0[7];
-#endif
-  int writer;
-  // ...other stuff we don't care about.
-};
-
-#endif  // __GLIBC__
 
 #if ART_USE_FUTEXES
 static bool ComputeRelativeTimeSpec(timespec* result_ts, const timespec& lhs, const timespec& rhs) {
@@ -102,17 +52,17 @@ struct AllMutexData {
   std::set<BaseMutex*>* all_mutexes;
   AllMutexData() : all_mutexes(NULL) {}
 };
-static struct AllMutexData all_mutex_data[kAllMutexDataSize];
+static struct AllMutexData gAllMutexData[kAllMutexDataSize];
 
 class ScopedAllMutexesLock {
  public:
   explicit ScopedAllMutexesLock(const BaseMutex* mutex) : mutex_(mutex) {
-    while (!all_mutex_data->all_mutexes_guard.compare_and_swap(0, reinterpret_cast<int32_t>(mutex))) {
+    while (!gAllMutexData->all_mutexes_guard.CompareAndSwap(0, reinterpret_cast<int32_t>(mutex))) {
       NanoSleep(100);
     }
   }
   ~ScopedAllMutexesLock() {
-    while (!all_mutex_data->all_mutexes_guard.compare_and_swap(reinterpret_cast<int32_t>(mutex_), 0)) {
+    while (!gAllMutexData->all_mutexes_guard.CompareAndSwap(reinterpret_cast<int32_t>(mutex_), 0)) {
       NanoSleep(100);
     }
   }
@@ -123,7 +73,7 @@ class ScopedAllMutexesLock {
 BaseMutex::BaseMutex(const char* name, LockLevel level) : level_(level), name_(name) {
   if (kLogLockContentions) {
     ScopedAllMutexesLock mu(this);
-    std::set<BaseMutex*>** all_mutexes_ptr = &all_mutex_data->all_mutexes;
+    std::set<BaseMutex*>** all_mutexes_ptr = &gAllMutexData->all_mutexes;
     if (*all_mutexes_ptr == NULL) {
       // We leak the global set of all mutexes to avoid ordering issues in global variable
       // construction/destruction.
@@ -136,7 +86,7 @@ BaseMutex::BaseMutex(const char* name, LockLevel level) : level_(level), name_(n
 BaseMutex::~BaseMutex() {
   if (kLogLockContentions) {
     ScopedAllMutexesLock mu(this);
-    all_mutex_data->all_mutexes->erase(this);
+    gAllMutexData->all_mutexes->erase(this);
   }
 }
 
@@ -144,13 +94,13 @@ void BaseMutex::DumpAll(std::ostream& os) {
   if (kLogLockContentions) {
     os << "Mutex logging:\n";
     ScopedAllMutexesLock mu(reinterpret_cast<const BaseMutex*>(-1));
-    std::set<BaseMutex*>* all_mutexes = all_mutex_data->all_mutexes;
+    std::set<BaseMutex*>* all_mutexes = gAllMutexData->all_mutexes;
     if (all_mutexes == NULL) {
       // No mutexes have been created yet during at startup.
       return;
     }
     typedef std::set<BaseMutex*>::const_iterator It;
-    os << "(Contented)\n";
+    os << "(Contended)\n";
     for (It it = all_mutexes->begin(); it != all_mutexes->end(); ++it) {
       BaseMutex* mutex = *it;
       if (mutex->HasEverContended()) {
@@ -175,7 +125,8 @@ void BaseMutex::CheckSafeToWait(Thread* self) {
     return;
   }
   if (kDebugLocking) {
-    CHECK(self->GetHeldMutex(level_) == this) << "Waiting on unacquired mutex: " << name_;
+    CHECK(self->GetHeldMutex(level_) == this || level_ == kMonitorLock)
+        << "Waiting on unacquired mutex: " << name_;
     bool bad_mutexes_held = false;
     for (int i = kLockLevelCount - 1; i >= 0; --i) {
       if (i != level_) {
@@ -223,7 +174,7 @@ void BaseMutex::RecordContention(uint64_t blocked_tid,
       do {
         slot = data->cur_content_log_entry;
         new_slot = (slot + 1) % kContentionLogSize;
-      } while (!data->cur_content_log_entry.compare_and_swap(slot, new_slot));
+      } while (!data->cur_content_log_entry.CompareAndSwap(slot, new_slot));
       log[new_slot].blocked_tid = blocked_tid;
       log[new_slot].owner_tid = owner_tid;
       log[new_slot].count = 1;
@@ -313,9 +264,8 @@ Mutex::Mutex(const char* name, LockLevel level, bool recursive)
 Mutex::~Mutex() {
 #if ART_USE_FUTEXES
   if (state_ != 0) {
-    MutexLock mu(Thread::Current(), *Locks::runtime_shutdown_lock_);
     Runtime* runtime = Runtime::Current();
-    bool shutting_down = (runtime == NULL) || runtime->IsShuttingDown();
+    bool shutting_down = runtime == nullptr || runtime->IsShuttingDown(Thread::Current());
     LOG(shutting_down ? WARNING : FATAL) << "destroying mutex with owner: " << exclusive_owner_;
   } else {
     CHECK_EQ(exclusive_owner_, 0U)  << "unexpectedly found an owner on unlocked mutex " << name_;
@@ -330,7 +280,7 @@ Mutex::~Mutex() {
     // TODO: should we just not log at all if shutting down? this could be the logging mutex!
     MutexLock mu(Thread::Current(), *Locks::runtime_shutdown_lock_);
     Runtime* runtime = Runtime::Current();
-    bool shutting_down = (runtime == NULL) || runtime->IsShuttingDown();
+    bool shutting_down = (runtime == NULL) || runtime->IsShuttingDownLocked();
     PLOG(shutting_down ? WARNING : FATAL) << "pthread_mutex_destroy failed for " << name_;
   }
 #endif
@@ -346,13 +296,13 @@ void Mutex::ExclusiveLock(Thread* self) {
     bool done = false;
     do {
       int32_t cur_state = state_;
-      if (cur_state == 0) {
+      if (LIKELY(cur_state == 0)) {
         // Change state from 0 to 1.
-        done = android_atomic_acquire_cas(0, 1, &state_) == 0;
+        done = __sync_bool_compare_and_swap(&state_, 0 /* cur_state */, 1 /* new state */);
       } else {
         // Failed to acquire, hang up.
         ScopedContentionRecorder scr(this, SafeGetTid(self), GetExclusiveOwnerTid());
-        android_atomic_inc(&num_contenders_);
+        num_contenders_++;
         if (futex(&state_, FUTEX_WAIT, 1, NULL, NULL, 0) != 0) {
           // EAGAIN and EINTR both indicate a spurious failure, try again from the beginning.
           // We don't use TEMP_FAILURE_RETRY so we can intentionally retry to acquire the lock.
@@ -360,9 +310,10 @@ void Mutex::ExclusiveLock(Thread* self) {
             PLOG(FATAL) << "futex wait failed for " << name_;
           }
         }
-        android_atomic_dec(&num_contenders_);
+        num_contenders_--;
       }
     } while (!done);
+    QuasiAtomic::MembarStoreLoad();
     DCHECK_EQ(state_, 1);
     exclusive_owner_ = SafeGetTid(self);
 #else
@@ -390,11 +341,12 @@ bool Mutex::ExclusiveTryLock(Thread* self) {
       int32_t cur_state = state_;
       if (cur_state == 0) {
         // Change state from 0 to 1.
-        done = android_atomic_acquire_cas(0, 1, &state_) == 0;
+        done = __sync_bool_compare_and_swap(&state_, 0 /* cur_state */, 1 /* new state */);
       } else {
         return false;
       }
     } while (!done);
+    QuasiAtomic::MembarStoreLoad();
     DCHECK_EQ(state_, 1);
     exclusive_owner_ = SafeGetTid(self);
 #else
@@ -432,14 +384,15 @@ void Mutex::ExclusiveUnlock(Thread* self) {
   bool done = false;
   do {
     int32_t cur_state = state_;
-    if (cur_state == 1) {
+    if (LIKELY(cur_state == 1)) {
+      QuasiAtomic::MembarStoreStore();
       // We're no longer the owner.
       exclusive_owner_ = 0;
       // Change state to 0.
-      done = android_atomic_release_cas(cur_state, 0, &state_) == 0;
-      if (done) {  // Spurious fail?
+      done =  __sync_bool_compare_and_swap(&state_, cur_state, 0 /* new state */);
+      if (LIKELY(done)) {  // Spurious fail?
         // Wake a contender
-        if (num_contenders_ > 0) {
+        if (UNLIKELY(num_contenders_ > 0)) {
           futex(&state_, FUTEX_WAKE, 1, NULL, NULL, 0);
         }
       }
@@ -455,45 +408,11 @@ void Mutex::ExclusiveUnlock(Thread* self) {
       }
     }
   } while (!done);
+  QuasiAtomic::MembarStoreLoad();
 #else
     CHECK_MUTEX_CALL(pthread_mutex_unlock, (&mutex_));
 #endif
   }
-}
-
-bool Mutex::IsExclusiveHeld(const Thread* self) const {
-  DCHECK(self == NULL || self == Thread::Current());
-  bool result = (GetExclusiveOwnerTid() == SafeGetTid(self));
-  if (kDebugLocking) {
-    // Sanity debug check that if we think it is locked we have it in our held mutexes.
-    if (result && self != NULL && level_ != kMonitorLock && !gAborting) {
-      CHECK_EQ(self->GetHeldMutex(level_), this);
-    }
-  }
-  return result;
-}
-
-uint64_t Mutex::GetExclusiveOwnerTid() const {
-#if ART_USE_FUTEXES
-  return exclusive_owner_;
-#elif defined(__BIONIC__)
-  return static_cast<uint64_t>((mutex_.value >> 16) & 0xffff);
-#elif defined(__GLIBC__)
-  return reinterpret_cast<const glibc_pthread_mutex_t*>(&mutex_)->owner;
-#elif defined(__APPLE__)
-  const darwin_pthread_mutex_t* dpmutex = reinterpret_cast<const darwin_pthread_mutex_t*>(&mutex_);
-  pthread_t owner = dpmutex->darwin_pthread_mutex_owner;
-  // 0 for unowned, -1 for PTHREAD_MTX_TID_SWITCHING
-  // TODO: should we make darwin_pthread_mutex_owner volatile and recheck until not -1?
-  if ((owner == (pthread_t)0) || (owner == (pthread_t)-1)) {
-    return 0;
-  }
-  uint64_t tid;
-  CHECK_PTHREAD_CALL(pthread_threadid_np, (owner, &tid), __FUNCTION__);  // Requires Mac OS 10.6
-  return tid;
-#else
-#error unsupported C library
-#endif
 }
 
 void Mutex::Dump(std::ostream& os) const {
@@ -536,7 +455,7 @@ ReaderWriterMutex::~ReaderWriterMutex() {
     // TODO: should we just not log at all if shutting down? this could be the logging mutex!
     MutexLock mu(Thread::Current(), *Locks::runtime_shutdown_lock_);
     Runtime* runtime = Runtime::Current();
-    bool shutting_down = runtime == NULL || runtime->IsShuttingDown();
+    bool shutting_down = runtime == NULL || runtime->IsShuttingDownLocked();
     PLOG(shutting_down ? WARNING : FATAL) << "pthread_rwlock_destroy failed for " << name_;
   }
 #endif
@@ -549,13 +468,13 @@ void ReaderWriterMutex::ExclusiveLock(Thread* self) {
   bool done = false;
   do {
     int32_t cur_state = state_;
-    if (cur_state == 0) {
+    if (LIKELY(cur_state == 0)) {
       // Change state from 0 to -1.
-      done = android_atomic_acquire_cas(0, -1, &state_) == 0;
+      done =  __sync_bool_compare_and_swap(&state_, 0 /* cur_state*/, -1 /* new state */);
     } else {
       // Failed to acquire, hang up.
       ScopedContentionRecorder scr(this, SafeGetTid(self), GetExclusiveOwnerTid());
-      android_atomic_inc(&num_pending_writers_);
+      num_pending_writers_++;
       if (futex(&state_, FUTEX_WAIT, cur_state, NULL, NULL, 0) != 0) {
         // EAGAIN and EINTR both indicate a spurious failure, try again from the beginning.
         // We don't use TEMP_FAILURE_RETRY so we can intentionally retry to acquire the lock.
@@ -563,7 +482,7 @@ void ReaderWriterMutex::ExclusiveLock(Thread* self) {
           PLOG(FATAL) << "futex wait failed for " << name_;
         }
       }
-      android_atomic_dec(&num_pending_writers_);
+      num_pending_writers_--;
     }
   } while (!done);
   DCHECK_EQ(state_, -1);
@@ -583,14 +502,14 @@ void ReaderWriterMutex::ExclusiveUnlock(Thread* self) {
   bool done = false;
   do {
     int32_t cur_state = state_;
-    if (cur_state == -1) {
+    if (LIKELY(cur_state == -1)) {
       // We're no longer the owner.
       exclusive_owner_ = 0;
       // Change state from -1 to 0.
-      done = android_atomic_release_cas(-1, 0, &state_) == 0;
-      if (done) {  // cmpxchg may fail due to noise?
+      done =  __sync_bool_compare_and_swap(&state_, -1 /* cur_state*/, 0 /* new state */);
+      if (LIKELY(done)) {  // cmpxchg may fail due to noise?
         // Wake any waiters.
-        if (num_pending_readers_ > 0 || num_pending_writers_ > 0) {
+        if (UNLIKELY(num_pending_readers_ > 0 || num_pending_writers_ > 0)) {
           futex(&state_, FUTEX_WAKE, -1, NULL, NULL, 0);
         }
       }
@@ -614,7 +533,7 @@ bool ReaderWriterMutex::ExclusiveLockWithTimeout(Thread* self, int64_t ms, int32
     int32_t cur_state = state_;
     if (cur_state == 0) {
       // Change state from 0 to -1.
-      done = android_atomic_acquire_cas(0, -1, &state_) == 0;
+      done =  __sync_bool_compare_and_swap(&state_, 0 /* cur_state */, -1 /* new state */);
     } else {
       // Failed to acquire, hang up.
       timespec now_abs_ts;
@@ -624,10 +543,10 @@ bool ReaderWriterMutex::ExclusiveLockWithTimeout(Thread* self, int64_t ms, int32
         return false;  // Timed out.
       }
       ScopedContentionRecorder scr(this, SafeGetTid(self), GetExclusiveOwnerTid());
-      android_atomic_inc(&num_pending_writers_);
+      num_pending_writers_++;
       if (futex(&state_, FUTEX_WAIT, cur_state, &rel_ts, NULL, 0) != 0) {
         if (errno == ETIMEDOUT) {
-          android_atomic_dec(&num_pending_writers_);
+          num_pending_writers_--;
           return false;  // Timed out.
         } else if ((errno != EAGAIN) && (errno != EINTR)) {
           // EAGAIN and EINTR both indicate a spurious failure,
@@ -636,7 +555,7 @@ bool ReaderWriterMutex::ExclusiveLockWithTimeout(Thread* self, int64_t ms, int32
           PLOG(FATAL) << "timed futex wait failed for " << name_;
         }
       }
-      android_atomic_dec(&num_pending_writers_);
+      num_pending_writers_--;
     }
   } while (!done);
   exclusive_owner_ = SafeGetTid(self);
@@ -666,7 +585,7 @@ bool ReaderWriterMutex::SharedTryLock(Thread* self) {
     int32_t cur_state = state_;
     if (cur_state >= 0) {
       // Add as an extra reader.
-      done = android_atomic_acquire_cas(cur_state, cur_state + 1, &state_) == 0;
+      done =  __sync_bool_compare_and_swap(&state_, cur_state, cur_state + 1);
     } else {
       // Owner holds it exclusively.
       return false;
@@ -687,18 +606,6 @@ bool ReaderWriterMutex::SharedTryLock(Thread* self) {
   return true;
 }
 
-bool ReaderWriterMutex::IsExclusiveHeld(const Thread* self) const {
-  DCHECK(self == NULL || self == Thread::Current());
-  bool result = (GetExclusiveOwnerTid() == SafeGetTid(self));
-  if (kDebugLocking) {
-    // Sanity that if the pthread thinks we own the lock the Thread agrees.
-    if (self != NULL && result)  {
-      CHECK_EQ(self->GetHeldMutex(level_), this);
-    }
-  }
-  return result;
-}
-
 bool ReaderWriterMutex::IsSharedHeld(const Thread* self) const {
   DCHECK(self == NULL || self == Thread::Current());
   bool result;
@@ -708,37 +615,6 @@ bool ReaderWriterMutex::IsSharedHeld(const Thread* self) const {
     result = (self->GetHeldMutex(level_) == this);
   }
   return result;
-}
-
-uint64_t ReaderWriterMutex::GetExclusiveOwnerTid() const {
-#if ART_USE_FUTEXES
-  int32_t state = state_;
-  if (state == 0) {
-    return 0;  // No owner.
-  } else if (state > 0) {
-    return -1;  // Shared.
-  } else {
-    return exclusive_owner_;
-  }
-#else
-#if defined(__BIONIC__)
-  return rwlock_.writerThreadId;
-#elif defined(__GLIBC__)
-  return reinterpret_cast<const glibc_pthread_rwlock_t*>(&rwlock_)->writer;
-#elif defined(__APPLE__)
-  const darwin_pthread_rwlock_t*
-      dprwlock = reinterpret_cast<const darwin_pthread_rwlock_t*>(&rwlock_);
-  pthread_t owner = dprwlock->darwin_pthread_rwlock_owner;
-  if (owner == (pthread_t)0) {
-    return 0;
-  }
-  uint64_t tid;
-  CHECK_PTHREAD_CALL(pthread_threadid_np, (owner, &tid), __FUNCTION__);  // Requires Mac OS 10.6
-  return tid;
-#else
-#error unsupported C library
-#endif
-#endif
 }
 
 void ReaderWriterMutex::Dump(std::ostream& os) const {
@@ -766,9 +642,8 @@ ConditionVariable::ConditionVariable(const char* name, Mutex& guard)
 ConditionVariable::~ConditionVariable() {
 #if ART_USE_FUTEXES
   if (num_waiters_!= 0) {
-    MutexLock mu(Thread::Current(), *Locks::runtime_shutdown_lock_);
     Runtime* runtime = Runtime::Current();
-    bool shutting_down = (runtime == NULL) || runtime->IsShuttingDown();
+    bool shutting_down = runtime == nullptr || runtime->IsShuttingDown(Thread::Current());
     LOG(shutting_down ? WARNING : FATAL) << "ConditionVariable::~ConditionVariable for " << name_
         << " called with " << num_waiters_ << " waiters.";
   }
@@ -780,7 +655,7 @@ ConditionVariable::~ConditionVariable() {
     errno = rc;
     MutexLock mu(Thread::Current(), *Locks::runtime_shutdown_lock_);
     Runtime* runtime = Runtime::Current();
-    bool shutting_down = (runtime == NULL) || runtime->IsShuttingDown();
+    bool shutting_down = (runtime == NULL) || runtime->IsShuttingDownLocked();
     PLOG(shutting_down ? WARNING : FATAL) << "pthread_cond_destroy failed for " << name_;
   }
 #endif
@@ -793,13 +668,13 @@ void ConditionVariable::Broadcast(Thread* self) {
   DCHECK_EQ(guard_.GetExclusiveOwnerTid(), SafeGetTid(self));
 #if ART_USE_FUTEXES
   if (num_waiters_ > 0) {
-    android_atomic_inc(&sequence_);  // Indicate the broadcast occurred.
+    sequence_++;  // Indicate the broadcast occurred.
     bool done = false;
     do {
       int32_t cur_sequence = sequence_;
       // Requeue waiters onto mutex. The waiter holds the contender count on the mutex high ensuring
       // mutex unlocks will awaken the requeued waiter thread.
-      done = futex(&sequence_, FUTEX_CMP_REQUEUE, 0,
+      done = futex(sequence_.Address(), FUTEX_CMP_REQUEUE, 0,
                    reinterpret_cast<const timespec*>(std::numeric_limits<int32_t>::max()),
                    &guard_.state_, cur_sequence) != -1;
       if (!done) {
@@ -819,10 +694,10 @@ void ConditionVariable::Signal(Thread* self) {
   guard_.AssertExclusiveHeld(self);
 #if ART_USE_FUTEXES
   if (num_waiters_ > 0) {
-    android_atomic_inc(&sequence_);  // Indicate a signal occurred.
+    sequence_++;  // Indicate a signal occurred.
     // Futex wake 1 waiter who will then come and in contend on mutex. It'd be nice to requeue them
     // to avoid this, however, requeueing can only move all waiters.
-    int num_woken = futex(&sequence_, FUTEX_WAKE, 1, NULL, NULL, 0);
+    int num_woken = futex(sequence_.Address(), FUTEX_WAKE, 1, NULL, NULL, 0);
     // Check something was woken or else we changed sequence_ before they had chance to wait.
     CHECK((num_woken == 0) || (num_woken == 1));
   }
@@ -843,11 +718,11 @@ void ConditionVariable::WaitHoldingLocks(Thread* self) {
 #if ART_USE_FUTEXES
   num_waiters_++;
   // Ensure the Mutex is contended so that requeued threads are awoken.
-  android_atomic_inc(&guard_.num_contenders_);
+  guard_.num_contenders_++;
   guard_.recursion_count_ = 1;
   int32_t cur_sequence = sequence_;
   guard_.ExclusiveUnlock(self);
-  if (futex(&sequence_, FUTEX_WAIT, cur_sequence, NULL, NULL, 0) != 0) {
+  if (futex(sequence_.Address(), FUTEX_WAIT, cur_sequence, NULL, NULL, 0) != 0) {
     // Futex failed, check it is an expected error.
     // EAGAIN == EWOULDBLK, so we let the caller try again.
     // EINTR implies a signal was sent to this thread.
@@ -860,7 +735,7 @@ void ConditionVariable::WaitHoldingLocks(Thread* self) {
   num_waiters_--;
   // We awoke and so no longer require awakes from the guard_'s unlock.
   CHECK_GE(guard_.num_contenders_, 0);
-  android_atomic_dec(&guard_.num_contenders_);
+  guard_.num_contenders_--;
 #else
   guard_.recursion_count_ = 0;
   CHECK_MUTEX_CALL(pthread_cond_wait, (&cond_, &guard_.mutex_));
@@ -878,11 +753,11 @@ void ConditionVariable::TimedWait(Thread* self, int64_t ms, int32_t ns) {
   InitTimeSpec(false, CLOCK_REALTIME, ms, ns, &rel_ts);
   num_waiters_++;
   // Ensure the Mutex is contended so that requeued threads are awoken.
-  android_atomic_inc(&guard_.num_contenders_);
+  guard_.num_contenders_++;
   guard_.recursion_count_ = 1;
   int32_t cur_sequence = sequence_;
   guard_.ExclusiveUnlock(self);
-  if (futex(&sequence_, FUTEX_WAIT, cur_sequence, &rel_ts, NULL, 0) != 0) {
+  if (futex(sequence_.Address(), FUTEX_WAIT, cur_sequence, &rel_ts, NULL, 0) != 0) {
     if (errno == ETIMEDOUT) {
       // Timed out we're done.
     } else if ((errno == EAGAIN) || (errno == EINTR)) {
@@ -896,7 +771,7 @@ void ConditionVariable::TimedWait(Thread* self, int64_t ms, int32_t ns) {
   num_waiters_--;
   // We awoke and so no longer require awakes from the guard_'s unlock.
   CHECK_GE(guard_.num_contenders_, 0);
-  android_atomic_dec(&guard_.num_contenders_);
+  guard_.num_contenders_--;
 #else
 #ifdef HAVE_TIMEDWAIT_MONOTONIC
 #define TIMEDWAIT pthread_cond_timedwait_monotonic

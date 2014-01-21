@@ -59,7 +59,7 @@ int32_t ThreadPoolTest::num_threads = 4;
 // Check that the thread pool actually runs tasks that you assign it.
 TEST_F(ThreadPoolTest, CheckRun) {
   Thread* self = Thread::Current();
-  ThreadPool thread_pool(num_threads);
+  ThreadPool thread_pool("Thread pool test thread pool", num_threads);
   AtomicInteger count(0);
   static const int32_t num_tasks = num_threads * 4;
   for (int32_t i = 0; i < num_tasks; ++i) {
@@ -74,7 +74,7 @@ TEST_F(ThreadPoolTest, CheckRun) {
 
 TEST_F(ThreadPoolTest, StopStart) {
   Thread* self = Thread::Current();
-  ThreadPool thread_pool(num_threads);
+  ThreadPool thread_pool("Thread pool test thread pool", num_threads);
   AtomicInteger count(0);
   static const int32_t num_tasks = num_threads * 4;
   for (int32_t i = 0; i < num_tasks; ++i) {
@@ -94,7 +94,7 @@ TEST_F(ThreadPoolTest, StopStart) {
   EXPECT_EQ(0, bad_count);
   // Allow tasks to finish up and delete themselves.
   thread_pool.StartWorkers(self);
-  while (count.load() != num_tasks && bad_count.load() != 1) {
+  while (count.Load() != num_tasks && bad_count.Load() != 1) {
     usleep(200);
   }
   thread_pool.StopWorkers(self);
@@ -129,7 +129,7 @@ class TreeTask : public Task {
 // Test that adding new tasks from within a task works.
 TEST_F(ThreadPoolTest, RecursiveTest) {
   Thread* self = Thread::Current();
-  ThreadPool thread_pool(num_threads);
+  ThreadPool thread_pool("Thread pool test thread pool", num_threads);
   AtomicInteger count(0);
   static const int depth = 8;
   thread_pool.AddTask(self, new TreeTask(&thread_pool, &count, depth));

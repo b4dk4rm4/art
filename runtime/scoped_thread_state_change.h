@@ -18,7 +18,6 @@
 #define ART_RUNTIME_SCOPED_THREAD_STATE_CHANGE_H_
 
 #include "base/casts.h"
-#include "jni_internal.h"
 #include "thread-inl.h"
 
 namespace art {
@@ -35,9 +34,8 @@ class ScopedThreadStateChange {
     if (UNLIKELY(self_ == NULL)) {
       // Value chosen arbitrarily and won't be used in the destructor since thread_ == NULL.
       old_thread_state_ = kTerminated;
-      MutexLock mu(NULL, *Locks::runtime_shutdown_lock_);
       Runtime* runtime = Runtime::Current();
-      CHECK(runtime == NULL || !runtime->IsStarted() || runtime->IsShuttingDown());
+      CHECK(runtime == NULL || !runtime->IsStarted() || runtime->IsShuttingDown(self_));
     } else {
       bool runnable_transition;
       DCHECK_EQ(self, Thread::Current());
@@ -64,9 +62,8 @@ class ScopedThreadStateChange {
   ~ScopedThreadStateChange() LOCKS_EXCLUDED(Locks::thread_suspend_count_lock_) ALWAYS_INLINE {
     if (UNLIKELY(self_ == NULL)) {
       if (!expected_has_no_thread_) {
-        MutexLock mu(NULL, *Locks::runtime_shutdown_lock_);
         Runtime* runtime = Runtime::Current();
-        bool shutting_down = (runtime == NULL) || runtime->IsShuttingDown();
+        bool shutting_down = (runtime == NULL) || runtime->IsShuttingDown(nullptr);
         CHECK(shutting_down);
       }
     } else {
@@ -122,14 +119,14 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
   explicit ScopedObjectAccessUnchecked(JNIEnv* env)
       LOCKS_EXCLUDED(Locks::thread_suspend_count_lock_) ALWAYS_INLINE
       : ScopedThreadStateChange(ThreadForEnv(env), kRunnable),
-        env_(reinterpret_cast<JNIEnvExt*>(env)), vm_(env_->vm) {
+        env_(down_cast<JNIEnvExt*>(env)), vm_(env_->vm) {
     self_->VerifyStack();
   }
 
   explicit ScopedObjectAccessUnchecked(Thread* self)
       LOCKS_EXCLUDED(Locks::thread_suspend_count_lock_)
       : ScopedThreadStateChange(self, kRunnable),
-        env_(reinterpret_cast<JNIEnvExt*>(self->GetJniEnv())),
+        env_(down_cast<JNIEnvExt*>(self->GetJniEnv())),
         vm_(env_ != NULL ? env_->vm : NULL) {
     self_->VerifyStack();
   }
@@ -137,7 +134,7 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
   // Used when we want a scoped JNI thread state but have no thread/JNIEnv. Consequently doesn't
   // change into Runnable or acquire a share on the mutator_lock_.
   explicit ScopedObjectAccessUnchecked(JavaVM* vm)
-      : ScopedThreadStateChange(), env_(NULL), vm_(reinterpret_cast<JavaVMExt*>(vm)) {}
+      : ScopedThreadStateChange(), env_(NULL), vm_(down_cast<JavaVMExt*>(vm)) {}
 
   // Here purely to force inlining.
   ~ScopedObjectAccessUnchecked() ALWAYS_INLINE {
@@ -162,9 +159,14 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
    */
   template<typename T>
   T AddLocalReference(mirror::Object* obj) const SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    Locks::mutator_lock_->AssertSharedHeld(Self());
     DCHECK_EQ(thread_state_, kRunnable);  // Don't work with raw objects in non-runnable states.
     if (obj == NULL) {
       return NULL;
+    }
+
+    if (kIsDebugBuild) {
+      Runtime::Current()->GetHeap()->VerifyObject(obj);
     }
 
     DCHECK_NE((reinterpret_cast<uintptr_t>(obj) & 0xffff0000), 0xebad0000);
@@ -185,7 +187,6 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
       }
     }
 #endif
-
     if (Vm()->work_around_app_jni_bugs) {
       // Hand out direct pointers to support broken old apps.
       return reinterpret_cast<T>(obj);
@@ -206,10 +207,7 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     Locks::mutator_lock_->AssertSharedHeld(Self());
     DCHECK_EQ(thread_state_, kRunnable);  // Don't work with raw objects in non-runnable states.
-#ifdef MOVING_GARBAGE_COLLECTOR
-    // TODO: we should make these unique weak globals if Field instances can ever move.
-    UNIMPLEMENTED(WARNING);
-#endif
+    CHECK(!kMovingFields);
     return reinterpret_cast<mirror::ArtField*>(fid);
   }
 
@@ -217,9 +215,7 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     Locks::mutator_lock_->AssertSharedHeld(Self());
     DCHECK_EQ(thread_state_, kRunnable);  // Don't work with raw objects in non-runnable states.
-#ifdef MOVING_GARBAGE_COLLECTOR
-    UNIMPLEMENTED(WARNING);
-#endif
+    CHECK(!kMovingFields);
     return reinterpret_cast<jfieldID>(field);
   }
 
@@ -227,10 +223,7 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     Locks::mutator_lock_->AssertSharedHeld(Self());
     DCHECK_EQ(thread_state_, kRunnable);  // Don't work with raw objects in non-runnable states.
-#ifdef MOVING_GARBAGE_COLLECTOR
-    // TODO: we should make these unique weak globals if Method instances can ever move.
-    UNIMPLEMENTED(WARNING);
-#endif
+    CHECK(!kMovingMethods);
     return reinterpret_cast<mirror::ArtMethod*>(mid);
   }
 
@@ -238,18 +231,11 @@ class ScopedObjectAccessUnchecked : public ScopedThreadStateChange {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     Locks::mutator_lock_->AssertSharedHeld(Self());
     DCHECK_EQ(thread_state_, kRunnable);  // Don't work with raw objects in non-runnable states.
-#ifdef MOVING_GARBAGE_COLLECTOR
-    UNIMPLEMENTED(WARNING);
-#endif
+    CHECK(!kMovingMethods);
     return reinterpret_cast<jmethodID>(method);
   }
 
  private:
-  static Thread* ThreadForEnv(JNIEnv* env) {
-    JNIEnvExt* full_env(reinterpret_cast<JNIEnvExt*>(env));
-    return full_env->self;
-  }
-
   // The full JNIEnv.
   JNIEnvExt* const env_;
   // The full JavaVM.

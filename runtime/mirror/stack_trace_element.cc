@@ -17,6 +17,7 @@
 #include "stack_trace_element.h"
 
 #include "class.h"
+#include "class-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "object-inl.h"
 #include "string.h"
@@ -38,24 +39,31 @@ void StackTraceElement::ResetClass() {
 }
 
 StackTraceElement* StackTraceElement::Alloc(Thread* self,
-                                            String* declaring_class,
-                                            String* method_name,
-                                            String* file_name,
+                                            SirtRef<String>& declaring_class,
+                                            SirtRef<String>& method_name,
+                                            SirtRef<String>& file_name,
                                             int32_t line_number) {
   StackTraceElement* trace =
       down_cast<StackTraceElement*>(GetStackTraceElement()->AllocObject(self));
   if (LIKELY(trace != NULL)) {
     trace->SetFieldObject(OFFSET_OF_OBJECT_MEMBER(StackTraceElement, declaring_class_),
-                          const_cast<String*>(declaring_class), false);
+                          declaring_class.get(), false);
     trace->SetFieldObject(OFFSET_OF_OBJECT_MEMBER(StackTraceElement, method_name_),
-                          const_cast<String*>(method_name), false);
+                          method_name.get(), false);
     trace->SetFieldObject(OFFSET_OF_OBJECT_MEMBER(StackTraceElement, file_name_),
-                          const_cast<String*>(file_name), false);
+                          file_name.get(), false);
     trace->SetField32(OFFSET_OF_OBJECT_MEMBER(StackTraceElement, line_number_),
                       line_number, false);
   }
   return trace;
 }
+
+void StackTraceElement::VisitRoots(RootVisitor* visitor, void* arg) {
+  if (java_lang_StackTraceElement_ != nullptr) {
+    java_lang_StackTraceElement_ = down_cast<Class*>(visitor(java_lang_StackTraceElement_, arg));
+  }
+}
+
 
 }  // namespace mirror
 }  // namespace art

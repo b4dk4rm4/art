@@ -41,7 +41,7 @@ extern "C" void* artFindNativeMethod() {
     return NULL;
   } else {
     // Register so that future calls don't come here
-    method->RegisterNative(self, native_code);
+    method->RegisterNative(self, native_code, false);
     return native_code;
   }
 }
@@ -50,7 +50,7 @@ static void WorkAroundJniBugsForJobject(intptr_t* arg_ptr) {
   intptr_t value = *arg_ptr;
   mirror::Object** value_as_jni_rep = reinterpret_cast<mirror::Object**>(value);
   mirror::Object* value_as_work_around_rep = value_as_jni_rep != NULL ? *value_as_jni_rep : NULL;
-  CHECK(Runtime::Current()->GetHeap()->IsHeapAddress(value_as_work_around_rep))
+  CHECK(Runtime::Current()->GetHeap()->IsValidObjectAddress(value_as_work_around_rep))
       << value_as_work_around_rep;
   *arg_ptr = reinterpret_cast<intptr_t>(value_as_work_around_rep);
 }
@@ -115,7 +115,7 @@ extern "C" const void* artWorkAroundAppJniBugs(Thread* self, intptr_t* sp)
   const void* code = reinterpret_cast<const void*>(jni_method->GetNativeGcMap());
   if (UNLIKELY(code == NULL)) {
     code = GetJniDlsymLookupStub();
-    jni_method->RegisterNative(self, code);
+    jni_method->RegisterNative(self, code, false);
   }
   return code;
 }

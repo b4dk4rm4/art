@@ -39,8 +39,12 @@ jobject InvokeMethod(const ScopedObjectAccess& soa, jobject javaMethod, jobject 
   mirror::ArtMethod* m = soa.DecodeMethod(mid);
 
   mirror::Class* declaring_class = m->GetDeclaringClass();
-  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(declaring_class, true, true)) {
-    return NULL;
+  if (UNLIKELY(!declaring_class->IsInitialized())) {
+    SirtRef<mirror::Class> sirt_c(soa.Self(), declaring_class);
+    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(sirt_c, true, true)) {
+      return nullptr;
+    }
+    declaring_class = sirt_c.get();
   }
 
   mirror::Object* receiver = NULL;
@@ -323,7 +327,7 @@ static bool UnboxPrimitive(const ThrowLocation* throw_location, mirror::Object* 
   }
 
   JValue boxed_value;
-  std::string src_descriptor(ClassHelper(o->GetClass()).GetDescriptor());
+  const StringPiece src_descriptor(ClassHelper(o->GetClass()).GetDescriptor());
   mirror::Class* src_class = NULL;
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   mirror::ArtField* primitive_field = o->GetClass()->GetIFields()->Get(0);
@@ -356,7 +360,7 @@ static bool UnboxPrimitive(const ThrowLocation* throw_location, mirror::Object* 
                                   StringPrintf("%s has type %s, got %s",
                                                UnboxingFailureKind(m, index, f).c_str(),
                                                PrettyDescriptor(dst_class).c_str(),
-                                               PrettyDescriptor(src_descriptor.c_str()).c_str()).c_str());
+                                               PrettyDescriptor(src_descriptor.data()).c_str()).c_str());
     return false;
   }
 

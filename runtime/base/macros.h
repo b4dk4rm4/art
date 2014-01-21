@@ -130,16 +130,29 @@ char (&ArraySizeHelper(T (&array)[N]))[N];
 #define LIKELY(x)       __builtin_expect((x), true)
 #define UNLIKELY(x)     __builtin_expect((x), false)
 
+// Stringify the argument.
+#define QUOTE(x) #x
+#define STRINGIFY(x) QUOTE(x)
+
 #ifndef NDEBUG
 #define ALWAYS_INLINE
 #else
 #define ALWAYS_INLINE  __attribute__ ((always_inline))
 #endif
 
+#ifdef __clang__
+/* clang doesn't like attributes on lambda functions */
+#define ALWAYS_INLINE_LAMBDA
+#else
+#define ALWAYS_INLINE_LAMBDA ALWAYS_INLINE
+#endif
+
 #if defined (__APPLE__)
 #define HOT_ATTR
+#define COLD_ATTR
 #else
 #define HOT_ATTR __attribute__ ((hot))
+#define COLD_ATTR __attribute__ ((cold))
 #endif
 
 #define PURE __attribute__ ((__pure__))

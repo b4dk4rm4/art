@@ -54,9 +54,11 @@ CardTable* CardTable::Create(const byte* heap_begin, size_t heap_capacity) {
   /* Set up the card table */
   size_t capacity = heap_capacity / kCardSize;
   /* Allocate an extra 256 bytes to allow fixed low-byte of base */
+  std::string error_msg;
   UniquePtr<MemMap> mem_map(MemMap::MapAnonymous("card table", NULL,
-                                                 capacity + 256, PROT_READ | PROT_WRITE));
-  CHECK(mem_map.get() != NULL) << "couldn't allocate card table";
+                                                 capacity + 256, PROT_READ | PROT_WRITE,
+                                                 &error_msg));
+  CHECK(mem_map.get() != NULL) << "couldn't allocate card table: " << error_msg;
   // All zeros is the correct initial value; all clean. Anonymous mmaps are initialized to zero, we
   // don't clear the card table to avoid unnecessary pages being allocated
   COMPILE_ASSERT(kCardClean == 0, card_clean_must_be_0);
@@ -93,8 +95,8 @@ void CardTable::ClearSpaceCards(space::ContinuousSpace* space) {
 }
 
 void CardTable::ClearCardTable() {
-  // TODO: clear just the range of the table that has been modified
-  memset(mem_map_->Begin(), kCardClean, mem_map_->Size());
+  COMPILE_ASSERT(kCardClean == 0, clean_card_must_be_0);
+  madvise(mem_map_->Begin(), mem_map_->Size(), MADV_DONTNEED);
 }
 
 bool CardTable::AddrIsInCardTable(const void* addr) const {

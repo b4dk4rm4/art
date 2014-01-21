@@ -76,6 +76,8 @@ int MipsMir2Lir::TargetReg(SpecialTargetRegister reg) {
     case kRet0: res = rMIPS_RET0; break;
     case kRet1: res = rMIPS_RET1; break;
     case kInvokeTgt: res = rMIPS_INVOKE_TGT; break;
+    case kHiddenArg: res = r_T0; break;
+    case kHiddenFpArg: res = INVALID_REG; break;
     case kCount: res = rMIPS_COUNT; break;
   }
   return res;
@@ -120,22 +122,21 @@ uint64_t MipsMir2Lir::GetPCUseDefEncoding() {
 }
 
 
-void MipsMir2Lir::SetupTargetResourceMasks(LIR* lir) {
+void MipsMir2Lir::SetupTargetResourceMasks(LIR* lir, uint64_t flags) {
   DCHECK_EQ(cu_->instruction_set, kMips);
+  DCHECK(!lir->flags.use_def_invalid);
 
   // Mips-specific resource map setup here.
-  uint64_t flags = MipsMir2Lir::EncodingMap[lir->opcode].flags;
-
   if (flags & REG_DEF_SP) {
-    lir->def_mask |= ENCODE_MIPS_REG_SP;
+    lir->u.m.def_mask |= ENCODE_MIPS_REG_SP;
   }
 
   if (flags & REG_USE_SP) {
-    lir->use_mask |= ENCODE_MIPS_REG_SP;
+    lir->u.m.use_mask |= ENCODE_MIPS_REG_SP;
   }
 
   if (flags & REG_DEF_LR) {
-    lir->def_mask |= ENCODE_MIPS_REG_LR;
+    lir->u.m.def_mask |= ENCODE_MIPS_REG_LR;
   }
 }
 
@@ -179,34 +180,35 @@ std::string MipsMir2Lir::BuildInsnString(const char *fmt, LIR *lir, unsigned cha
              }
              break;
            case 's':
-             sprintf(tbuf, "$f%d", operand & MIPS_FP_REG_MASK);
+             snprintf(tbuf, arraysize(tbuf), "$f%d", operand & MIPS_FP_REG_MASK);
              break;
            case 'S':
              DCHECK_EQ(((operand & MIPS_FP_REG_MASK) & 1), 0);
-             sprintf(tbuf, "$f%d", operand & MIPS_FP_REG_MASK);
+             snprintf(tbuf, arraysize(tbuf), "$f%d", operand & MIPS_FP_REG_MASK);
              break;
            case 'h':
-             sprintf(tbuf, "%04x", operand);
+             snprintf(tbuf, arraysize(tbuf), "%04x", operand);
              break;
            case 'M':
            case 'd':
-             sprintf(tbuf, "%d", operand);
+             snprintf(tbuf, arraysize(tbuf), "%d", operand);
              break;
            case 'D':
-             sprintf(tbuf, "%d", operand+1);
+             snprintf(tbuf, arraysize(tbuf), "%d", operand+1);
              break;
            case 'E':
-             sprintf(tbuf, "%d", operand*4);
+             snprintf(tbuf, arraysize(tbuf), "%d", operand*4);
              break;
            case 'F':
-             sprintf(tbuf, "%d", operand*2);
+             snprintf(tbuf, arraysize(tbuf), "%d", operand*2);
              break;
            case 't':
-             sprintf(tbuf, "0x%08x (L%p)", reinterpret_cast<uintptr_t>(base_addr) + lir->offset + 4 +
-                     (operand << 2), lir->target);
+             snprintf(tbuf, arraysize(tbuf), "0x%08x (L%p)",
+                      reinterpret_cast<uintptr_t>(base_addr) + lir->offset + 4 + (operand << 2),
+                      lir->target);
              break;
            case 'T':
-             sprintf(tbuf, "0x%08x", operand << 2);
+             snprintf(tbuf, arraysize(tbuf), "0x%08x", operand << 2);
              break;
            case 'u': {
              int offset_1 = lir->operands[0];
@@ -214,7 +216,7 @@ std::string MipsMir2Lir::BuildInsnString(const char *fmt, LIR *lir, unsigned cha
              uintptr_t target =
                  (((reinterpret_cast<uintptr_t>(base_addr) + lir->offset + 4) & ~3) +
                  (offset_1 << 21 >> 9) + (offset_2 << 1)) & 0xfffffffc;
-             sprintf(tbuf, "%p", reinterpret_cast<void*>(target));
+             snprintf(tbuf, arraysize(tbuf), "%p", reinterpret_cast<void*>(target));
              break;
           }
 
@@ -256,7 +258,7 @@ void MipsMir2Lir::DumpResourceMask(LIR *mips_lir, uint64_t mask, const char *pre
 
     for (i = 0; i < kMipsRegEnd; i++) {
       if (mask & (1ULL << i)) {
-        sprintf(num, "%d ", i);
+        snprintf(num, arraysize(num), "%d ", i);
         strcat(buf, num);
       }
     }
@@ -269,8 +271,9 @@ void MipsMir2Lir::DumpResourceMask(LIR *mips_lir, uint64_t mask, const char *pre
     }
     /* Memory bits */
     if (mips_lir && (mask & ENCODE_DALVIK_REG)) {
-      sprintf(buf + strlen(buf), "dr%d%s", mips_lir->alias_info & 0xffff,
-              (mips_lir->alias_info & 0x80000000) ? "(+1)" : "");
+      snprintf(buf + strlen(buf), arraysize(buf) - strlen(buf), "dr%d%s",
+               DECODE_ALIAS_INFO_REG(mips_lir->flags.alias_info),
+               DECODE_ALIAS_INFO_WIDE(mips_lir->flags.alias_info) ? "(+1)" : "");
     }
     if (mask & ENCODE_LITERAL) {
       strcat(buf, "lit ");
@@ -345,7 +348,7 @@ bool MipsMir2Lir::IsFpReg(int reg) {
 }
 
 /* Clobber all regs that might be used by an external C call */
-void MipsMir2Lir::ClobberCalleeSave() {
+void MipsMir2Lir::ClobberCallerSave() {
   Clobber(r_ZERO);
   Clobber(r_AT);
   Clobber(r_V0);
@@ -397,11 +400,6 @@ RegLocation MipsMir2Lir::GetReturnAlt() {
   UNIMPLEMENTED(FATAL) << "No GetReturnAlt for MIPS";
   RegLocation res = LocCReturn();
   return res;
-}
-
-MipsMir2Lir::RegisterInfo* MipsMir2Lir::GetRegInfo(int reg) {
-  return MIPS_FPREG(reg) ? &reg_pool_->FPRegs[reg & MIPS_FP_REG_MASK]
-            : &reg_pool_->core_regs[reg];
 }
 
 /* To be used when explicitly managing register use */
@@ -559,14 +557,17 @@ Mir2Lir* MipsCodeGenerator(CompilationUnit* const cu, MIRGraph* const mir_graph,
 }
 
 uint64_t MipsMir2Lir::GetTargetInstFlags(int opcode) {
+  DCHECK(!IsPseudoLirOp(opcode));
   return MipsMir2Lir::EncodingMap[opcode].flags;
 }
 
 const char* MipsMir2Lir::GetTargetInstName(int opcode) {
+  DCHECK(!IsPseudoLirOp(opcode));
   return MipsMir2Lir::EncodingMap[opcode].name;
 }
 
 const char* MipsMir2Lir::GetTargetInstFmt(int opcode) {
+  DCHECK(!IsPseudoLirOp(opcode));
   return MipsMir2Lir::EncodingMap[opcode].fmt;
 }
 

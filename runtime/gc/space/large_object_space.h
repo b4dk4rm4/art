@@ -41,23 +41,33 @@ class LargeObjectSpace : public DiscontinuousSpace, public AllocSpace {
   virtual void Walk(DlMallocSpace::WalkCallback, void* arg) = 0;
   virtual ~LargeObjectSpace() {}
 
-  uint64_t GetBytesAllocated() const {
+  uint64_t GetBytesAllocated() {
     return num_bytes_allocated_;
   }
 
-  uint64_t GetObjectsAllocated() const {
+  uint64_t GetObjectsAllocated() {
     return num_objects_allocated_;
   }
 
-  uint64_t GetTotalBytesAllocated() const {
+  uint64_t GetTotalBytesAllocated() {
     return total_bytes_allocated_;
   }
 
-  uint64_t GetTotalObjectsAllocated() const {
+  uint64_t GetTotalObjectsAllocated() {
     return total_objects_allocated_;
   }
 
   size_t FreeList(Thread* self, size_t num_ptrs, mirror::Object** ptrs);
+
+  virtual bool IsAllocSpace() const {
+    return true;
+  }
+
+  virtual AllocSpace* AsAllocSpace() {
+    return this;
+  }
+
+  virtual void Sweep(bool swap_bitmaps, size_t* freed_objects, size_t* freed_bytes);
 
  protected:
   explicit LargeObjectSpace(const std::string& name);
@@ -96,9 +106,9 @@ class LargeObjectMapSpace : public LargeObjectSpace {
   // Used to ensure mutual exclusion when the allocation spaces data structures are being modified.
   mutable Mutex lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   std::vector<mirror::Object*,
-      accounting::GCAllocator<mirror::Object*> > large_objects_ GUARDED_BY(lock_);
+      accounting::GcAllocator<mirror::Object*> > large_objects_ GUARDED_BY(lock_);
   typedef SafeMap<mirror::Object*, MemMap*, std::less<mirror::Object*>,
-      accounting::GCAllocator<std::pair<const mirror::Object*, MemMap*> > > MemMaps;
+      accounting::GcAllocator<std::pair<const mirror::Object*, MemMap*> > > MemMaps;
   MemMaps mem_maps_ GUARDED_BY(lock_);
 };
 
@@ -108,7 +118,8 @@ class FreeListSpace : public LargeObjectSpace {
   virtual ~FreeListSpace();
   static FreeListSpace* Create(const std::string& name, byte* requested_begin, size_t capacity);
 
-  size_t AllocationSize(const mirror::Object* obj) EXCLUSIVE_LOCKS_REQUIRED(lock_);
+  size_t AllocationSize(const mirror::Object* obj)
+      EXCLUSIVE_LOCKS_REQUIRED(lock_);
   mirror::Object* Alloc(Thread* self, size_t num_bytes, size_t* bytes_allocated);
   size_t Free(Thread* self, mirror::Object* obj);
   bool Contains(const mirror::Object* obj) const;
@@ -217,7 +228,7 @@ class FreeListSpace : public LargeObjectSpace {
   AllocationHeader* GetAllocationHeader(const mirror::Object* obj);
 
   typedef std::set<AllocationHeader*, AllocationHeader::SortByPrevFree,
-                   accounting::GCAllocator<AllocationHeader*> > FreeBlocks;
+                   accounting::GcAllocator<AllocationHeader*> > FreeBlocks;
 
   byte* const begin_;
   byte* const end_;

@@ -17,8 +17,6 @@
 #ifndef ART_RUNTIME_THREAD_H_
 #define ART_RUNTIME_THREAD_H_
 
-#include <pthread.h>
-
 #include <bitset>
 #include <deque>
 #include <iosfwd>
@@ -70,6 +68,7 @@ class Runtime;
 class ScopedObjectAccess;
 class ScopedObjectAccessUnchecked;
 class ShadowFrame;
+struct SingleStepControl;
 class Thread;
 class ThreadList;
 
@@ -104,16 +103,7 @@ class PACKED(4) Thread {
   // Reset internal state of child thread after fork.
   void InitAfterFork();
 
-  static Thread* Current() {
-    // We rely on Thread::Current returning NULL for a detached thread, so it's not obvious
-    // that we can replace this with a direct %fs access on x86.
-    if (!is_started_) {
-      return NULL;
-    } else {
-      void* thread = pthread_getspecific(Thread::pthread_key_self_);
-      return reinterpret_cast<Thread*>(thread);
-    }
-  }
+  static Thread* Current();
 
   static Thread* FromManagedThread(const ScopedObjectAccessUnchecked& ts,
                                    mirror::Object* thread_peer)
@@ -143,7 +133,17 @@ class PACKED(4) Thread {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   ThreadState GetState() const {
+    DCHECK(state_and_flags_.as_struct.state >= kTerminated && state_and_flags_.as_struct.state <= kSuspended);
     return static_cast<ThreadState>(state_and_flags_.as_struct.state);
+  }
+
+  // This function can be used to make sure a thread's state is valid.
+  void CheckState(int id) const {
+    if (state_and_flags_.as_struct.state >= kTerminated && state_and_flags_.as_struct.state <= kSuspended) {
+      return;
+    }
+    LOG(INFO) << "Thread " << this << " state is invalid: " << state_and_flags_.as_struct.state << " id=" << id;
+    CHECK(false);
   }
 
   ThreadState SetState(ThreadState new_state);
@@ -157,7 +157,8 @@ class PACKED(4) Thread {
   }
 
   bool IsSuspended() const {
-    union StateAndFlags state_and_flags = state_and_flags_;
+    union StateAndFlags state_and_flags;
+    state_and_flags.as_int = state_and_flags_.as_int;
     return state_and_flags.as_struct.state != kRunnable &&
         (state_and_flags.as_struct.flags & kSuspendRequest) != 0;
   }
@@ -165,7 +166,8 @@ class PACKED(4) Thread {
   void ModifySuspendCount(Thread* self, int delta, bool for_debugger)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::thread_suspend_count_lock_);
 
-  bool RequestCheckpoint(Closure* function);
+  bool RequestCheckpoint(Closure* function)
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::thread_suspend_count_lock_);
 
   // Called when thread detected that the thread_suspend_count_ was non-zero. Gives up share of
   // mutator_lock_ and waits until it is resumed and thread_suspend_count_ is zero.
@@ -186,43 +188,28 @@ class PACKED(4) Thread {
       UNLOCK_FUNCTION(Locks::mutator_lock_)
       ALWAYS_INLINE;
 
-  // Wait for a debugger suspension on the thread associated with the given peer. Returns the
-  // thread on success, else NULL. If the thread should be suspended then request_suspension should
-  // be true on entry. If the suspension times out then *timeout is set to true.
-  static Thread* SuspendForDebugger(jobject peer,  bool request_suspension, bool* timed_out)
-      LOCKS_EXCLUDED(Locks::mutator_lock_,
-                     Locks::thread_list_lock_,
-                     Locks::thread_suspend_count_lock_);
-
   // Once called thread suspension will cause an assertion failure.
-#ifndef NDEBUG
   const char* StartAssertNoThreadSuspension(const char* cause) {
-    CHECK(cause != NULL);
-    const char* previous_cause = last_no_thread_suspension_cause_;
-    no_thread_suspension_++;
-    last_no_thread_suspension_cause_ = cause;
-    return previous_cause;
+    if (kIsDebugBuild) {
+      CHECK(cause != NULL);
+      const char* previous_cause = last_no_thread_suspension_cause_;
+      no_thread_suspension_++;
+      last_no_thread_suspension_cause_ = cause;
+      return previous_cause;
+    } else {
+      return nullptr;
+    }
   }
-#else
-  const char* StartAssertNoThreadSuspension(const char* cause) {
-    CHECK(cause != NULL);
-    return NULL;
-  }
-#endif
 
   // End region where no thread suspension is expected.
-#ifndef NDEBUG
   void EndAssertNoThreadSuspension(const char* old_cause) {
-    CHECK(old_cause != NULL || no_thread_suspension_ == 1);
-    CHECK_GT(no_thread_suspension_, 0U);
-    no_thread_suspension_--;
-    last_no_thread_suspension_cause_ = old_cause;
+    if (kIsDebugBuild) {
+      CHECK(old_cause != NULL || no_thread_suspension_ == 1);
+      CHECK_GT(no_thread_suspension_, 0U);
+      no_thread_suspension_--;
+      last_no_thread_suspension_cause_ = old_cause;
+    }
   }
-#else
-  void EndAssertNoThreadSuspension(const char*) {
-  }
-#endif
-
 
   void AssertThreadSuspensionIsAllowable(bool check_locks = true) const;
 
@@ -230,7 +217,7 @@ class PACKED(4) Thread {
     return daemon_;
   }
 
-  bool HoldsLock(mirror::Object*);
+  bool HoldsLock(mirror::Object*) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   /*
    * Changes the priority of this thread to match that of the java.lang.Thread object.
@@ -248,8 +235,8 @@ class PACKED(4) Thread {
    */
   static int GetNativePriority();
 
-  uint32_t GetThinLockId() const {
-    return thin_lock_id_;
+  uint32_t GetThreadId() const {
+    return thin_lock_thread_id_;
   }
 
   pid_t GetTid() const {
@@ -388,9 +375,7 @@ class PACKED(4) Thread {
     return class_loader_override_;
   }
 
-  void SetClassLoaderOverride(mirror::ClassLoader* class_loader_override) {
-    class_loader_override_ = class_loader_override;
-  }
+  void SetClassLoaderOverride(mirror::ClassLoader* class_loader_override);
 
   // Create the internal representation of a stack trace, that is more time
   // and space efficient to compute than the StackTraceElement[]
@@ -405,9 +390,6 @@ class PACKED(4) Thread {
       jobjectArray output_array = NULL, int* stack_depth = NULL);
 
   void VisitRoots(RootVisitor* visitor, void* arg) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  void VerifyRoots(VerifyRootVisitor* visitor, void* arg)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   void VerifyStack() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -428,7 +410,7 @@ class PACKED(4) Thread {
   }
 
   static ThreadOffset ThinLockIdOffset() {
-    return ThreadOffset(OFFSETOF_MEMBER(Thread, thin_lock_id_));
+    return ThreadOffset(OFFSETOF_MEMBER(Thread, thin_lock_thread_id_));
   }
 
   static ThreadOffset CardTableOffset() {
@@ -543,6 +525,10 @@ class PACKED(4) Thread {
     return debug_invoke_req_;
   }
 
+  SingleStepControl* GetSingleStepControl() const {
+    return single_step_control_;
+  }
+
   void SetDeoptimizationShadowFrame(ShadowFrame* sf);
   void SetDeoptimizationReturnValue(const JValue& ret_val);
 
@@ -590,6 +576,8 @@ class PACKED(4) Thread {
 
   void AtomicClearFlag(ThreadFlag flag);
 
+  void ResetQuickAllocEntryPointsForThread();
+
  private:
   // We have no control over the size of 'bool', but want our boolean fields
   // to be 4-byte quantities.
@@ -599,10 +587,8 @@ class PACKED(4) Thread {
   ~Thread() LOCKS_EXCLUDED(Locks::mutator_lock_,
                            Locks::thread_suspend_count_lock_);
   void Destroy();
-  friend class ThreadList;  // For ~Thread and Destroy.
 
   void CreatePeer(const char* name, bool as_daemon, jobject thread_group);
-  friend class Runtime;  // For CreatePeer.
 
   // Avoid use, callers should use SetState. Used only by SignalCatcher::HandleSigQuit, ~Thread and
   // Dbg::Disconnected.
@@ -611,8 +597,6 @@ class PACKED(4) Thread {
     state_and_flags_.as_struct.state = new_state;
     return old_state;
   }
-  friend class SignalCatcher;  // For SetStateUnsafe.
-  friend class Dbg;  // F or SetStateUnsafe.
 
   void VerifyStackImpl() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -661,7 +645,8 @@ class PACKED(4) Thread {
 
   // 32 bits of atomically changed state and flags. Keeping as 32 bits allows and atomic CAS to
   // change from being Suspended to Runnable without a suspend request occurring.
-  union StateAndFlags {
+  union PACKED(4) StateAndFlags {
+    StateAndFlags() {}
     struct PACKED(4) {
       // Bitfield of flag values. Must be changed atomically so that flag values aren't lost. See
       // ThreadFlags for bit field meanings.
@@ -673,6 +658,11 @@ class PACKED(4) Thread {
       volatile uint16_t state;
     } as_struct;
     volatile int32_t as_int;
+
+   private:
+    // gcc does not handle struct with volatile member assignments correctly.
+    // See http://gcc.gnu.org/bugzilla/show_bug.cgi?id=47409
+    DISALLOW_COPY_AND_ASSIGN(StateAndFlags);
   };
   union StateAndFlags state_and_flags_;
   COMPILE_ASSERT(sizeof(union StateAndFlags) == sizeof(int32_t),
@@ -714,18 +704,18 @@ class PACKED(4) Thread {
   // Size of the stack
   size_t stack_size_;
 
-  // Pointer to previous stack trace captured by sampling profiler.
-  std::vector<mirror::ArtMethod*>* stack_trace_sample_;
-
-  // The clock base used for tracing.
-  uint64_t trace_clock_base_;
-
   // Thin lock thread id. This is a small integer used by the thin lock implementation.
   // This is not to be confused with the native thread's tid, nor is it the value returned
   // by java.lang.Thread.getId --- this is a distinct value, used only for locking. One
   // important difference between this id and the ids visible to managed code is that these
   // ones get reused (to ensure that they fit in the number of bits available).
-  uint32_t thin_lock_id_;
+  uint32_t thin_lock_thread_id_;
+
+  // Pointer to previous stack trace captured by sampling profiler.
+  std::vector<mirror::ArtMethod*>* stack_trace_sample_;
+
+  // The clock base used for tracing.
+  uint64_t trace_clock_base_;
 
   // System thread id.
   pid_t tid_;
@@ -734,18 +724,18 @@ class PACKED(4) Thread {
 
   // Guards the 'interrupted_' and 'wait_monitor_' members.
   mutable Mutex* wait_mutex_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  // Condition variable waited upon during a wait.
   ConditionVariable* wait_cond_ GUARDED_BY(wait_mutex_);
-  // Pointer to the monitor lock we're currently waiting on (or NULL).
+  // Pointer to the monitor lock we're currently waiting on or NULL if not waiting.
   Monitor* wait_monitor_ GUARDED_BY(wait_mutex_);
   // Thread "interrupted" status; stays raised until queried or thrown.
   bool32_t interrupted_ GUARDED_BY(wait_mutex_);
-  // The next thread in the wait set this thread is part of.
+  // The next thread in the wait set this thread is part of or NULL if not waiting.
   Thread* wait_next_;
+
+
   // If we're blocked in MonitorEnter, this is the object we're trying to lock.
   mirror::Object* monitor_enter_object_;
-
-  friend class Monitor;
-  friend class MonitorInfo;
 
   // Top of linked list of stack indirect reference tables or NULL for none
   StackIndirectReferenceTable* top_sirt_;
@@ -770,6 +760,9 @@ class PACKED(4) Thread {
 
   // JDWP invoke-during-breakpoint support.
   DebugInvokeReq* debug_invoke_req_;
+
+  // JDWP single-stepping support.
+  SingleStepControl* single_step_control_;
 
   // Shadow frame that is used temporarily during the deoptimization of a method.
   ShadowFrame* deoptimization_shadow_frame_;
@@ -797,8 +790,12 @@ class PACKED(4) Thread {
   // Cause for last suspension.
   const char* last_no_thread_suspension_cause_;
 
-  // Pending checkpoint functions.
-  Closure* checkpoint_function_;
+  // Maximum number of checkpoint functions.
+  static constexpr uint32_t kMaxCheckpoints = 3;
+
+  // Pending checkpoint function or NULL if non-pending. Installation guarding by
+  // Locks::thread_suspend_count_lock_.
+  Closure* checkpoint_functions_[kMaxCheckpoints];
 
  public:
   // Entrypoint function pointers
@@ -808,11 +805,36 @@ class PACKED(4) Thread {
   PortableEntryPoints portable_entrypoints_;
   QuickEntryPoints quick_entrypoints_;
 
- private:
   // How many times has our pthread key's destructor been called?
   uint32_t thread_exit_check_count_;
 
+  // Thread-local allocation pointer.
+  byte* thread_local_start_;
+  byte* thread_local_pos_;
+  byte* thread_local_end_;
+  size_t thread_local_objects_;
+  // Returns the remaining space in the TLAB.
+  size_t TlabSize() const;
+  // Doesn't check that there is room.
+  mirror::Object* AllocTlab(size_t bytes);
+  void SetTlab(byte* start, byte* end);
+
+  // Thread-local rosalloc runs. There are 34 size brackets in rosalloc
+  // runs (RosAlloc::kNumOfSizeBrackets). We can't refer to the
+  // RosAlloc class due to a header file circular dependency issue.
+  // To compensate, we check that the two values match at RosAlloc
+  // initialization time.
+  static const size_t kRosAllocNumOfSizeBrackets = 34;
+  void* rosalloc_runs_[kRosAllocNumOfSizeBrackets];
+
+ private:
+  friend class Dbg;  // For SetStateUnsafe.
+  friend class Monitor;
+  friend class MonitorInfo;
+  friend class Runtime;  // For CreatePeer.
   friend class ScopedThreadStateChange;
+  friend class SignalCatcher;  // For SetStateUnsafe.
+  friend class ThreadList;  // For ~Thread and Destroy.
 
   DISALLOW_COPY_AND_ASSIGN(Thread);
 };

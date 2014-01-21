@@ -41,8 +41,10 @@ namespace art {
 class AOTCompilationStats;
 class ParallelCompilationManager;
 class DexCompilationUnit;
+class DexFileToMethodInlinerMap;
 class OatWriter;
 class TimingLogger;
+class VerifiedMethodsData;
 
 enum CompilerBackend {
   kQuick,
@@ -90,22 +92,37 @@ class CompilerDriver {
   // enabled.  "image_classes" lets the compiler know what classes it
   // can assume will be in the image, with NULL implying all available
   // classes.
-  explicit CompilerDriver(CompilerBackend compiler_backend, InstructionSet instruction_set,
+  explicit CompilerDriver(VerifiedMethodsData* verified_methods_data,
+                          DexFileToMethodInlinerMap* method_inliner_map,
+                          CompilerBackend compiler_backend, InstructionSet instruction_set,
+                          InstructionSetFeatures instruction_set_features,
                           bool image, DescriptorSet* image_classes,
                           size_t thread_count, bool dump_stats);
 
   ~CompilerDriver();
 
   void CompileAll(jobject class_loader, const std::vector<const DexFile*>& dex_files,
-                  base::TimingLogger& timings)
+                  TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   // Compile a single Method
-  void CompileOne(const mirror::ArtMethod* method, base::TimingLogger& timings)
+  void CompileOne(const mirror::ArtMethod* method, TimingLogger& timings)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  InstructionSet GetInstructionSet() const {
+  VerifiedMethodsData* GetVerifiedMethodsData() const {
+    return verified_methods_data_;
+  }
+
+  DexFileToMethodInlinerMap* GetMethodInlinerMap() const {
+    return method_inliner_map_;
+  }
+
+  const InstructionSet& GetInstructionSet() const {
     return instruction_set_;
+  }
+
+  const InstructionSetFeatures& GetInstructionSetFeatures() const {
+    return instruction_set_features_;
   }
 
   CompilerBackend GetCompilerBackend() const {
@@ -130,9 +147,13 @@ class CompilerDriver {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   const std::vector<uint8_t>* CreateJniDlsymLookup() const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  const std::vector<uint8_t>* CreatePortableImtConflictTrampoline() const
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   const std::vector<uint8_t>* CreatePortableResolutionTrampoline() const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   const std::vector<uint8_t>* CreatePortableToInterpreterBridge() const
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  const std::vector<uint8_t>* CreateQuickImtConflictTrampoline() const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   const std::vector<uint8_t>* CreateQuickResolutionTrampoline() const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
@@ -151,8 +172,7 @@ class CompilerDriver {
 
   // Callbacks from compiler to see what runtime checks must be generated.
 
-  bool CanAssumeTypeIsPresentInDexCache(const DexFile& dex_file, uint32_t type_idx)
-      LOCKS_EXCLUDED(Locks::mutator_lock_);
+  bool CanAssumeTypeIsPresentInDexCache(const DexFile& dex_file, uint32_t type_idx);
 
   bool CanAssumeStringIsPresentInDexCache(const DexFile& dex_file, uint32_t string_idx)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
@@ -170,22 +190,23 @@ class CompilerDriver {
      LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   // Can we fast path instance field access? Computes field's offset and volatility.
-  bool ComputeInstanceFieldInfo(uint32_t field_idx, const DexCompilationUnit* mUnit,
-                                int& field_offset, bool& is_volatile, bool is_put)
+  bool ComputeInstanceFieldInfo(uint32_t field_idx, const DexCompilationUnit* mUnit, bool is_put,
+                                int* field_offset, bool* is_volatile)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   // Can we fastpath static field access? Computes field's offset, volatility and whether the
   // field is within the referrer (which can avoid checking class initialization).
-  bool ComputeStaticFieldInfo(uint32_t field_idx, const DexCompilationUnit* mUnit,
-                              int& field_offset, int& ssb_index,
-                              bool& is_referrers_class, bool& is_volatile, bool is_put)
+  bool ComputeStaticFieldInfo(uint32_t field_idx, const DexCompilationUnit* mUnit, bool is_put,
+                              int* field_offset, int* storage_index,
+                              bool* is_referrers_class, bool* is_volatile, bool* is_initialized)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   // Can we fastpath a interface, super class or virtual method call? Computes method's vtable
   // index.
   bool ComputeInvokeInfo(const DexCompilationUnit* mUnit, const uint32_t dex_pc,
-                         InvokeType& type, MethodReference& target_method, int& vtable_idx,
-                         uintptr_t& direct_code, uintptr_t& direct_method, bool update_stats)
+                         bool update_stats, bool enable_devirtualization,
+                         InvokeType* type, MethodReference* target_method, int* vtable_idx,
+                         uintptr_t* direct_code, uintptr_t* direct_method)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   bool IsSafeCast(const MethodReference& mr, uint32_t dex_pc);
@@ -320,50 +341,53 @@ class CompilerDriver {
 
  private:
   // Compute constant code and method pointers when possible
-  void GetCodeAndMethodForDirectCall(InvokeType type, InvokeType sharp_type,
+  void GetCodeAndMethodForDirectCall(InvokeType* type, InvokeType sharp_type,
+                                     bool no_guarantee_of_dex_cache_entry,
                                      mirror::Class* referrer_class,
                                      mirror::ArtMethod* method,
-                                     uintptr_t& direct_code, uintptr_t& direct_method,
-                                     bool update_stats)
+                                     bool update_stats,
+                                     MethodReference* target_method,
+                                     uintptr_t* direct_code, uintptr_t* direct_method)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   void PreCompile(jobject class_loader, const std::vector<const DexFile*>& dex_files,
-                  ThreadPool& thread_pool, base::TimingLogger& timings)
+                  ThreadPool& thread_pool, TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
-  void LoadImageClasses(base::TimingLogger& timings);
+  void LoadImageClasses(TimingLogger& timings);
 
   // Attempt to resolve all type, methods, fields, and strings
   // referenced from code in the dex file following PathClassLoader
   // ordering semantics.
   void Resolve(jobject class_loader, const std::vector<const DexFile*>& dex_files,
-               ThreadPool& thread_pool, base::TimingLogger& timings)
+               ThreadPool& thread_pool, TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
   void ResolveDexFile(jobject class_loader, const DexFile& dex_file,
-                      ThreadPool& thread_pool, base::TimingLogger& timings)
+                      ThreadPool& thread_pool, TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   void Verify(jobject class_loader, const std::vector<const DexFile*>& dex_files,
-              ThreadPool& thread_pool, base::TimingLogger& timings);
+              ThreadPool& thread_pool, TimingLogger& timings);
   void VerifyDexFile(jobject class_loader, const DexFile& dex_file,
-                     ThreadPool& thread_pool, base::TimingLogger& timings)
+                     ThreadPool& thread_pool, TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
 
   void InitializeClasses(jobject class_loader, const std::vector<const DexFile*>& dex_files,
-                         ThreadPool& thread_pool, base::TimingLogger& timings)
+                         ThreadPool& thread_pool, TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
   void InitializeClasses(jobject class_loader, const DexFile& dex_file,
-                         ThreadPool& thread_pool, base::TimingLogger& timings)
+                         ThreadPool& thread_pool, TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_, compiled_classes_lock_);
 
-  void UpdateImageClasses(base::TimingLogger& timings);
+  void UpdateImageClasses(TimingLogger& timings)
+      LOCKS_EXCLUDED(Locks::mutator_lock_);
   static void FindClinitImageClassesCallback(mirror::Object* object, void* arg)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   void Compile(jobject class_loader, const std::vector<const DexFile*>& dex_files,
-               ThreadPool& thread_pool, base::TimingLogger& timings);
+               ThreadPool& thread_pool, TimingLogger& timings);
   void CompileDexFile(jobject class_loader, const DexFile& dex_file,
-                      ThreadPool& thread_pool, base::TimingLogger& timings)
+                      ThreadPool& thread_pool, TimingLogger& timings)
       LOCKS_EXCLUDED(Locks::mutator_lock_);
   void CompileMethod(const DexFile::CodeItem* code_item, uint32_t access_flags,
                      InvokeType invoke_type, uint16_t class_def_idx, uint32_t method_idx,
@@ -377,9 +401,13 @@ class CompilerDriver {
   std::vector<const PatchInformation*> code_to_patch_;
   std::vector<const PatchInformation*> methods_to_patch_;
 
+  VerifiedMethodsData* verified_methods_data_;
+  DexFileToMethodInlinerMap* method_inliner_map_;
+
   CompilerBackend compiler_backend_;
 
-  InstructionSet instruction_set_;
+  const InstructionSet instruction_set_;
+  const InstructionSetFeatures instruction_set_features_;
 
   // All class references that require
   mutable ReaderWriterMutex freezing_constructor_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
@@ -458,27 +486,40 @@ class CompilerDriver {
   class DedupeHashFunc {
    public:
     size_t operator()(const std::vector<uint8_t>& array) const {
-      // Take a random sample of bytes.
+      // For small arrays compute a hash using every byte.
       static const size_t kSmallArrayThreshold = 16;
-      static const size_t kRandomHashCount = 16;
-      size_t hash = 0;
-      if (array.size() < kSmallArrayThreshold) {
-        for (auto c : array) {
-          hash = hash * 54 + c;
+      size_t hash = 0x811c9dc5;
+      if (array.size() <= kSmallArrayThreshold) {
+        for (uint8_t b : array) {
+          hash = (hash * 16777619) ^ b;
         }
       } else {
-        for (size_t i = 0; i < kRandomHashCount; ++i) {
+        // For larger arrays use the 2 bytes at 6 bytes (the location of a push registers
+        // instruction field for quick generated code on ARM) and then select a number of other
+        // values at random.
+        static const size_t kRandomHashCount = 16;
+        for (size_t i = 0; i < 2; ++i) {
+          uint8_t b = array[i + 6];
+          hash = (hash * 16777619) ^ b;
+        }
+        for (size_t i = 2; i < kRandomHashCount; ++i) {
           size_t r = i * 1103515245 + 12345;
-          hash = hash * 54 + array[r % array.size()];
+          uint8_t b = array[r % array.size()];
+          hash = (hash * 16777619) ^ b;
         }
       }
+      hash += hash << 13;
+      hash ^= hash >> 7;
+      hash += hash << 3;
+      hash ^= hash >> 17;
+      hash += hash << 5;
       return hash;
     }
   };
-  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc> dedupe_code_;
-  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc> dedupe_mapping_table_;
-  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc> dedupe_vmap_table_;
-  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc> dedupe_gc_map_;
+  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc, 4> dedupe_code_;
+  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc, 4> dedupe_mapping_table_;
+  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc, 4> dedupe_vmap_table_;
+  DedupeSet<std::vector<uint8_t>, size_t, DedupeHashFunc, 4> dedupe_gc_map_;
 
   DISALLOW_COPY_AND_ASSIGN(CompilerDriver);
 };

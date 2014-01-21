@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 The Android Open Source Project
+ * Copyright (C) 2013 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,25 +14,31 @@
  * limitations under the License.
  */
 
-#ifndef ART_RUNTIME_DISASSEMBLER_X86_H_
-#define ART_RUNTIME_DISASSEMBLER_X86_H_
+#ifndef ART_RUNTIME_COMPILER_CALLBACKS_H_
+#define ART_RUNTIME_COMPILER_CALLBACKS_H_
 
-#include "disassembler.h"
+#include "class_reference.h"
 
 namespace art {
-namespace x86 {
 
-class DisassemblerX86 : public Disassembler {
- public:
-  DisassemblerX86();
+namespace verifier {
 
-  virtual size_t Dump(std::ostream& os, const uint8_t* begin);
-  virtual void Dump(std::ostream& os, const uint8_t* begin, const uint8_t* end);
- private:
-  size_t DumpInstruction(std::ostream& os, const uint8_t* instr);
+class MethodVerifier;
+
+}  // namespace verifier
+
+class CompilerCallbacks {
+  public:
+    virtual ~CompilerCallbacks() { }
+
+    virtual bool MethodVerified(verifier::MethodVerifier* verifier)
+        SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) = 0;
+    virtual void ClassRejected(ClassReference ref) = 0;
+
+  protected:
+    CompilerCallbacks() { }
 };
 
-}  // namespace x86
 }  // namespace art
 
-#endif  // ART_RUNTIME_DISASSEMBLER_X86_H_
+#endif  // ART_RUNTIME_COMPILER_CALLBACKS_H_

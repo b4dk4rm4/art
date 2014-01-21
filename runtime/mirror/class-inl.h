@@ -23,6 +23,7 @@
 #include "art_method.h"
 #include "class_loader.h"
 #include "dex_cache.h"
+#include "gc/heap-inl.h"
 #include "iftable.h"
 #include "object_array-inl.h"
 #include "runtime.h"
@@ -34,9 +35,7 @@ namespace mirror {
 inline size_t Class::GetObjectSize() const {
   DCHECK(!IsVariableSize()) << " class=" << PrettyTypeOf(this);
   DCHECK_EQ(sizeof(size_t), sizeof(int32_t));
-  size_t result = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, object_size_), false);
-  DCHECK_GE(result, sizeof(Object)) << " class=" << PrettyTypeOf(this);
-  return result;
+  return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, object_size_), false);
 }
 
 inline Class* Class::GetSuperClass() const {
@@ -140,6 +139,14 @@ inline void Class::SetVTable(ObjectArray<ArtMethod>* new_vtable)
   SetFieldObject(OFFSET_OF_OBJECT_MEMBER(Class, vtable_), new_vtable, false);
 }
 
+inline ObjectArray<ArtMethod>* Class::GetImTable() const {
+  return GetFieldObject<ObjectArray<ArtMethod>*>(OFFSET_OF_OBJECT_MEMBER(Class, imtable_), false);
+}
+
+inline void Class::SetImTable(ObjectArray<ArtMethod>* new_imtable) {
+  SetFieldObject(OFFSET_OF_OBJECT_MEMBER(Class, imtable_), new_imtable, false);
+}
+
 inline bool Class::Implements(const Class* klass) const {
   DCHECK(klass != NULL);
   DCHECK(klass->IsInterface()) << PrettyClass(this);
@@ -241,7 +248,7 @@ inline ArtMethod* Class::FindVirtualMethodForVirtualOrInterface(ArtMethod* metho
   if (method->IsDirect()) {
     return method;
   }
-  if (method->GetDeclaringClass()->IsInterface()) {
+  if (method->GetDeclaringClass()->IsInterface() && !method->IsMiranda()) {
     return FindVirtualMethodForInterface(method);
   }
   return FindVirtualMethodForVirtual(method);
@@ -340,6 +347,30 @@ inline String* Class::GetName() const {
 }
 inline void Class::SetName(String* name) {
   SetFieldObject(OFFSET_OF_OBJECT_MEMBER(Class, name_), name, false);
+}
+
+inline void Class::CheckObjectAlloc() {
+  DCHECK(!IsArrayClass()) << PrettyClass(this);
+  DCHECK(IsInstantiable()) << PrettyClass(this);
+  // TODO: decide whether we want this check. It currently fails during bootstrap.
+  // DCHECK(!Runtime::Current()->IsStarted() || IsInitializing()) << PrettyClass(this);
+  DCHECK_GE(this->object_size_, sizeof(Object));
+}
+
+template <bool kIsInstrumented>
+inline Object* Class::Alloc(Thread* self, gc::AllocatorType allocator_type) {
+  CheckObjectAlloc();
+  gc::Heap* heap = Runtime::Current()->GetHeap();
+  return heap->AllocObjectWithAllocator<kIsInstrumented, false>(self, this, this->object_size_,
+                                                                allocator_type);
+}
+
+inline Object* Class::AllocObject(Thread* self) {
+  return Alloc<true>(self, Runtime::Current()->GetHeap()->GetCurrentAllocator());
+}
+
+inline Object* Class::AllocNonMovableObject(Thread* self) {
+  return Alloc<true>(self, Runtime::Current()->GetHeap()->GetCurrentNonMovingAllocator());
 }
 
 }  // namespace mirror

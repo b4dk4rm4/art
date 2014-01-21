@@ -48,9 +48,9 @@ class JniCompilerTest : public CommonTest {
   void CompileForTest(jobject class_loader, bool direct,
                       const char* method_name, const char* method_sig) {
     ScopedObjectAccess soa(Thread::Current());
+    SirtRef<mirror::ClassLoader> loader(soa.Self(), soa.Decode<mirror::ClassLoader*>(class_loader));
     // Compile the native method before starting the runtime
-    mirror::Class* c = class_linker_->FindClass("LMyClassNatives;",
-                                                soa.Decode<mirror::ClassLoader*>(class_loader));
+    mirror::Class* c = class_linker_->FindClass("LMyClassNatives;", loader);
     mirror::ArtMethod* method;
     if (direct) {
       method = c->FindDirectMethod(method_name, method_sig);
@@ -152,7 +152,7 @@ TEST_F(JniCompilerTest, CompileAndRunIntMethodThroughStub) {
   std::string reason;
   ASSERT_TRUE(
       Runtime::Current()->GetJavaVM()->LoadNativeLibrary("", soa.Decode<mirror::ClassLoader*>(class_loader_),
-                                                         reason)) << reason;
+                                                         &reason)) << reason;
 
   jint result = env_->CallNonvirtualIntMethod(jobj_, jklass_, jmethod_, 24);
   EXPECT_EQ(25, result);
@@ -167,7 +167,7 @@ TEST_F(JniCompilerTest, CompileAndRunStaticIntMethodThroughStub) {
   std::string reason;
   ASSERT_TRUE(
       Runtime::Current()->GetJavaVM()->LoadNativeLibrary("", soa.Decode<mirror::ClassLoader*>(class_loader_),
-                                                         reason)) << reason;
+                                                         &reason)) << reason;
 
   jint result = env_->CallStaticIntMethod(jklass_, jmethod_, 42);
   EXPECT_EQ(43, result);

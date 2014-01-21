@@ -99,7 +99,7 @@ std::string PreciseConstType::Dump() const {
 }
 
 std::string BooleanType::Dump() const {
-  return "boolean";
+  return "Boolean";
 }
 
 std::string ConflictType::Dump() const {
@@ -111,7 +111,7 @@ std::string ByteType::Dump() const {
 }
 
 std::string ShortType::Dump() const {
-  return "short";
+  return "Short";
 }
 
 std::string CharType::Dump() const {
@@ -119,15 +119,15 @@ std::string CharType::Dump() const {
 }
 
 std::string FloatType::Dump() const {
-  return "float";
+  return "Float";
 }
 
 std::string LongLoType::Dump() const {
-  return "long (Low Half)";
+  return "Long (Low Half)";
 }
 
 std::string LongHiType::Dump() const {
-  return "long (High Half)";
+  return "Long (High Half)";
 }
 
 std::string DoubleLoType::Dump() const {
@@ -461,7 +461,6 @@ std::string ImpreciseConstType::Dump() const {
   std::stringstream result;
   uint32_t val = ConstantValue();
   if (val == 0) {
-    CHECK(IsPreciseConstant());
     result << "Zero/null";
   } else {
     result << "Imprecise ";
@@ -762,11 +761,6 @@ bool RegType::IsStrictlyAssignableFrom(const RegType& src) const {
   return AssignableFrom(*this, src, true);
 }
 
-int32_t ConstantType::ConstantValue() const {
-  DCHECK(IsConstantTypes());
-  return constant_;
-}
-
 int32_t ConstantType::ConstantValueLo() const {
   DCHECK(IsConstantLo());
   return constant_;
@@ -934,7 +928,8 @@ mirror::Class* RegType::ClassJoin(mirror::Class* s, mirror::Class* t) {
     }
     mirror::Class* common_elem = ClassJoin(s_ct, t_ct);
     ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    mirror::ClassLoader* class_loader = s->GetClassLoader();
+    Thread* self = Thread::Current();
+    SirtRef<mirror::ClassLoader> class_loader(self, s->GetClassLoader());
     std::string descriptor("[");
     descriptor += ClassHelper(common_elem).GetDescriptor();
     mirror::Class* array_class = class_linker->FindClass(descriptor.c_str(), class_loader);
@@ -971,6 +966,12 @@ void RegType::CheckInvariants() const {
   }
   if (klass_ != NULL) {
     CHECK(!descriptor_.empty()) << *this;
+  }
+}
+
+void RegType::VisitRoots(RootVisitor* visitor, void* arg) {
+  if (klass_ != nullptr) {
+    klass_ = down_cast<mirror::Class*>(visitor(klass_, arg));
   }
 }
 

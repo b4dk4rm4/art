@@ -51,7 +51,6 @@ class ArmMir2Lir : public Mir2Lir {
     int AllocTypedTempPair(bool fp_hint, int reg_class);
     int S2d(int low_reg, int high_reg);
     int TargetReg(SpecialTargetRegister reg);
-    RegisterInfo* GetRegInfo(int reg);
     RegLocation GetReturnAlt();
     RegLocation GetReturnWideAlt();
     RegLocation LocCReturn();
@@ -61,7 +60,7 @@ class ArmMir2Lir : public Mir2Lir {
     uint32_t FpRegMask();
     uint64_t GetRegMaskCommon(int reg);
     void AdjustSpillMask();
-    void ClobberCalleeSave();
+    void ClobberCallerSave();
     void FlushReg(int reg);
     void FlushRegWide(int reg1, int reg2);
     void FreeCallTemps();
@@ -71,9 +70,13 @@ class ArmMir2Lir : public Mir2Lir {
     void CompilerInitializeRegAlloc();
 
     // Required for target - miscellaneous.
-    AssemblerStatus AssembleInstructions(uintptr_t start_addr);
+    void AssembleLIR();
+    uint32_t EncodeRange(LIR* head_lir, LIR* tail_lir, uint32_t starting_offset);
+    int AssignInsnOffsets();
+    void AssignOffsets();
+    void EncodeLIR(LIR* lir);
     void DumpResourceMask(LIR* lir, uint64_t mask, const char* prefix);
-    void SetupTargetResourceMasks(LIR* lir);
+    void SetupTargetResourceMasks(LIR* lir, uint64_t flags);
     const char* GetTargetInstFmt(int opcode);
     const char* GetTargetInstName(int opcode);
     std::string BuildInsnString(const char* fmt, LIR* lir, unsigned char* base_addr);
@@ -85,12 +88,10 @@ class ArmMir2Lir : public Mir2Lir {
     // Required for target - Dalvik-level generators.
     void GenArithImmOpLong(Instruction::Code opcode, RegLocation rl_dest,
                            RegLocation rl_src1, RegLocation rl_src2);
-    void GenArrayObjPut(int opt_flags, RegLocation rl_array, RegLocation rl_index,
-                        RegLocation rl_src, int scale);
     void GenArrayGet(int opt_flags, OpSize size, RegLocation rl_array,
                      RegLocation rl_index, RegLocation rl_dest, int scale);
-    void GenArrayPut(int opt_flags, OpSize size, RegLocation rl_array,
-                     RegLocation rl_index, RegLocation rl_src, int scale);
+    void GenArrayPut(int opt_flags, OpSize size, RegLocation rl_array, RegLocation rl_index,
+                     RegLocation rl_src, int scale, bool card_mark);
     void GenShiftImmOpLong(Instruction::Code opcode, RegLocation rl_dest,
                            RegLocation rl_src1, RegLocation rl_shift);
     void GenMulLong(RegLocation rl_dest, RegLocation rl_src1, RegLocation rl_src2);
@@ -103,9 +104,11 @@ class ArmMir2Lir : public Mir2Lir {
     void GenCmpFP(Instruction::Code opcode, RegLocation rl_dest, RegLocation rl_src1,
                   RegLocation rl_src2);
     void GenConversion(Instruction::Code opcode, RegLocation rl_dest, RegLocation rl_src);
-    bool GenInlinedCas32(CallInfo* info, bool need_write_barrier);
+    bool GenInlinedCas(CallInfo* info, bool is_long, bool is_object);
     bool GenInlinedMinMaxInt(CallInfo* info, bool is_min);
     bool GenInlinedSqrt(CallInfo* info);
+    bool GenInlinedPeek(CallInfo* info, OpSize size);
+    bool GenInlinedPoke(CallInfo* info, OpSize size);
     void GenNegLong(RegLocation rl_dest, RegLocation rl_src);
     void GenOrLong(RegLocation rl_dest, RegLocation rl_src1, RegLocation rl_src2);
     void GenSubLong(RegLocation rl_dest, RegLocation rl_src1, RegLocation rl_src2);
@@ -118,7 +121,7 @@ class ArmMir2Lir : public Mir2Lir {
     void GenDivZeroCheck(int reg_lo, int reg_hi);
     void GenEntrySequence(RegLocation* ArgLocs, RegLocation rl_method);
     void GenExitSequence();
-    void GenFillArrayData(uint32_t table_offset, RegLocation rl_src);
+    void GenFillArrayData(DexOffset table_offset, RegLocation rl_src);
     void GenFusedFPCmpBranch(BasicBlock* bb, MIR* mir, bool gt_bias, bool is_double);
     void GenFusedLongCmpBranch(BasicBlock* bb, MIR* mir);
     void GenSelect(BasicBlock* bb, MIR* mir);
@@ -130,9 +133,9 @@ class ArmMir2Lir : public Mir2Lir {
                                                int first_bit, int second_bit);
     void GenNegDouble(RegLocation rl_dest, RegLocation rl_src);
     void GenNegFloat(RegLocation rl_dest, RegLocation rl_src);
-    void GenPackedSwitch(MIR* mir, uint32_t table_offset, RegLocation rl_src);
-    void GenSparseSwitch(MIR* mir, uint32_t table_offset, RegLocation rl_src);
-    void GenSpecialCase(BasicBlock* bb, MIR* mir, SpecialCaseHandler special_case);
+    void GenPackedSwitch(MIR* mir, DexOffset table_offset, RegLocation rl_src);
+    void GenSparseSwitch(MIR* mir, DexOffset table_offset, RegLocation rl_src);
+    void GenSpecialCase(BasicBlock* bb, MIR* mir, const InlineMethod& special);
 
     // Required for target - single operation generators.
     LIR* OpUnconditionalBranch(LIR* target);
@@ -150,6 +153,7 @@ class ArmMir2Lir : public Mir2Lir {
     LIR* OpRegImm(OpKind op, int r_dest_src1, int value);
     LIR* OpRegMem(OpKind op, int r_dest, int rBase, int offset);
     LIR* OpRegReg(OpKind op, int r_dest_src1, int r_src2);
+    LIR* OpCondRegReg(OpKind op, ConditionCode cc, int r_dest, int r_src);
     LIR* OpRegRegImm(OpKind op, int r_dest, int r_src1, int value);
     LIR* OpRegRegReg(OpKind op, int r_dest, int r_src1, int r_src2);
     LIR* OpTestSuspend(LIR* target);
@@ -188,6 +192,9 @@ class ArmMir2Lir : public Mir2Lir {
     MIR* SpecialIdentity(MIR* mir);
     LIR* LoadFPConstantValue(int r_dest, int value);
     bool BadOverlap(RegLocation rl_src, RegLocation rl_dest);
+    void ReplaceFixup(LIR* prev_lir, LIR* orig_lir, LIR* new_lir);
+    void InsertFixupBefore(LIR* prev_lir, LIR* orig_lir, LIR* new_lir);
+    void AssignDataOffsets();
 };
 
 }  // namespace art

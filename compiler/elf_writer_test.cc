@@ -29,9 +29,19 @@ class ElfWriterTest : public CommonTest {
   }
 };
 
-#define EXPECT_ELF_FILE_ADDRESS(ef, value, name, build_map) \
-  EXPECT_EQ(value, reinterpret_cast<void*>(ef->FindSymbolAddress(::llvm::ELF::SHT_DYNSYM, name, build_map))); \
-  EXPECT_EQ(value, ef->FindDynamicSymbolAddress(name)); \
+#define EXPECT_ELF_FILE_ADDRESS(ef, expected_value, symbol_name, build_map) \
+  do { \
+    void* addr = reinterpret_cast<void*>(ef->FindSymbolAddress(::llvm::ELF::SHT_DYNSYM, \
+                                                               symbol_name, \
+                                                               build_map)); \
+    EXPECT_NE(nullptr, addr); \
+    EXPECT_LT(static_cast<uintptr_t>(ART_BASE_ADDRESS), reinterpret_cast<uintptr_t>(addr)); \
+    if (expected_value == nullptr) { \
+      expected_value = addr; \
+    }                        \
+    EXPECT_EQ(expected_value, addr); \
+    EXPECT_EQ(expected_value, ef->FindDynamicSymbolAddress(symbol_name)); \
+  } while (false)
 
 TEST_F(ElfWriterTest, dlsym) {
   std::string elf_filename;
@@ -45,43 +55,55 @@ TEST_F(ElfWriterTest, dlsym) {
   LOG(INFO) << "elf_filename=" << elf_filename;
 
   UnreserveImageSpace();
-  void* dl_oat_so = dlopen(elf_filename.c_str(), RTLD_NOW);
-  ASSERT_TRUE(dl_oat_so != NULL) << dlerror();
-  void* dl_oatdata = dlsym(dl_oat_so, "oatdata");
-  ASSERT_TRUE(dl_oatdata != NULL);
+  void* dl_oatdata = NULL;
+  void* dl_oatexec = NULL;
+  void* dl_oatlastword = NULL;
 
-  OatHeader* dl_oat_header = reinterpret_cast<OatHeader*>(dl_oatdata);
-  ASSERT_TRUE(dl_oat_header->IsValid());
-  void* dl_oatexec = dlsym(dl_oat_so, "oatexec");
-  ASSERT_TRUE(dl_oatexec != NULL);
-  ASSERT_LT(dl_oatdata, dl_oatexec);
+#if defined(ART_USE_PORTABLE_COMPILER)
+  {
+    // We only use dlopen for loading with portable. See OatFile::Open.
+    void* dl_oat_so = dlopen(elf_filename.c_str(), RTLD_NOW);
+    ASSERT_TRUE(dl_oat_so != NULL) << dlerror();
+    dl_oatdata = dlsym(dl_oat_so, "oatdata");
+    ASSERT_TRUE(dl_oatdata != NULL);
 
-  void* dl_oatlastword = dlsym(dl_oat_so, "oatlastword");
-  ASSERT_TRUE(dl_oatlastword != NULL);
-  ASSERT_LT(dl_oatexec, dl_oatlastword);
+    OatHeader* dl_oat_header = reinterpret_cast<OatHeader*>(dl_oatdata);
+    ASSERT_TRUE(dl_oat_header->IsValid());
+    dl_oatexec = dlsym(dl_oat_so, "oatexec");
+    ASSERT_TRUE(dl_oatexec != NULL);
+    ASSERT_LT(dl_oatdata, dl_oatexec);
 
-  ASSERT_EQ(0, dlclose(dl_oat_so));
+    dl_oatlastword = dlsym(dl_oat_so, "oatlastword");
+    ASSERT_TRUE(dl_oatlastword != NULL);
+    ASSERT_LT(dl_oatexec, dl_oatlastword);
+
+    ASSERT_EQ(0, dlclose(dl_oat_so));
+  }
+#endif
 
   UniquePtr<File> file(OS::OpenFileForReading(elf_filename.c_str()));
   ASSERT_TRUE(file.get() != NULL);
   {
-    UniquePtr<ElfFile> ef(ElfFile::Open(file.get(), false, false));
-    CHECK(ef.get() != NULL);
+    std::string error_msg;
+    UniquePtr<ElfFile> ef(ElfFile::Open(file.get(), false, false, &error_msg));
+    CHECK(ef.get() != nullptr) << error_msg;
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatdata, "oatdata", false);
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatexec, "oatexec", false);
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatlastword, "oatlastword", false);
   }
   {
-    UniquePtr<ElfFile> ef(ElfFile::Open(file.get(), false, false));
-    CHECK(ef.get() != NULL);
+    std::string error_msg;
+    UniquePtr<ElfFile> ef(ElfFile::Open(file.get(), false, false, &error_msg));
+    CHECK(ef.get() != nullptr) << error_msg;
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatdata, "oatdata", true);
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatexec, "oatexec", true);
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatlastword, "oatlastword", true);
   }
   {
-    UniquePtr<ElfFile> ef(ElfFile::Open(file.get(), false, true));
-    CHECK(ef.get() != NULL);
-    ef->Load(false);
+    std::string error_msg;
+    UniquePtr<ElfFile> ef(ElfFile::Open(file.get(), false, true, &error_msg));
+    CHECK(ef.get() != nullptr) << error_msg;
+    CHECK(ef->Load(false, &error_msg)) << error_msg;
     EXPECT_EQ(dl_oatdata, ef->FindDynamicSymbolAddress("oatdata"));
     EXPECT_EQ(dl_oatexec, ef->FindDynamicSymbolAddress("oatexec"));
     EXPECT_EQ(dl_oatlastword, ef->FindDynamicSymbolAddress("oatlastword"));

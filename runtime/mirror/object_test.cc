@@ -71,12 +71,21 @@ class ObjectTest : public CommonTest {
 
 // Keep the assembly code in sync
 TEST_F(ObjectTest, AsmConstants) {
-  ASSERT_EQ(STRING_VALUE_OFFSET, String::ValueOffset().Int32Value());
-  ASSERT_EQ(STRING_COUNT_OFFSET, String::CountOffset().Int32Value());
-  ASSERT_EQ(STRING_OFFSET_OFFSET, String::OffsetOffset().Int32Value());
-  ASSERT_EQ(STRING_DATA_OFFSET, Array::DataOffset(sizeof(uint16_t)).Int32Value());
+  EXPECT_EQ(CLASS_OFFSET, Object::ClassOffset().Int32Value());
+  EXPECT_EQ(LOCK_WORD_OFFSET, Object::MonitorOffset().Int32Value());
 
-  ASSERT_EQ(METHOD_CODE_OFFSET, ArtMethod::EntryPointFromCompiledCodeOffset().Int32Value());
+  EXPECT_EQ(CLASS_COMPONENT_TYPE_OFFSET, Class::ComponentTypeOffset().Int32Value());
+
+  EXPECT_EQ(ARRAY_LENGTH_OFFSET, Array::LengthOffset().Int32Value());
+  EXPECT_EQ(OBJECT_ARRAY_DATA_OFFSET, Array::DataOffset(sizeof(Object*)).Int32Value());
+
+  EXPECT_EQ(STRING_VALUE_OFFSET, String::ValueOffset().Int32Value());
+  EXPECT_EQ(STRING_COUNT_OFFSET, String::CountOffset().Int32Value());
+  EXPECT_EQ(STRING_OFFSET_OFFSET, String::OffsetOffset().Int32Value());
+  EXPECT_EQ(STRING_DATA_OFFSET, Array::DataOffset(sizeof(uint16_t)).Int32Value());
+
+  EXPECT_EQ(METHOD_DEX_CACHE_METHODS_OFFSET, ArtMethod::DexCacheResolvedMethodsOffset().Int32Value());
+  EXPECT_EQ(METHOD_CODE_OFFSET, ArtMethod::EntryPointFromCompiledCodeOffset().Int32Value());
 }
 
 TEST_F(ObjectTest, IsInSamePackage) {
@@ -135,15 +144,15 @@ TEST_F(ObjectTest, AllocObjectArray) {
 TEST_F(ObjectTest, AllocArray) {
   ScopedObjectAccess soa(Thread::Current());
   Class* c = class_linker_->FindSystemClass("[I");
-  SirtRef<Array> a(soa.Self(), Array::Alloc(soa.Self(), c, 1));
+  SirtRef<Array> a(soa.Self(), Array::Alloc<true>(soa.Self(), c, 1));
   ASSERT_TRUE(c == a->GetClass());
 
   c = class_linker_->FindSystemClass("[Ljava/lang/Object;");
-  a.reset(Array::Alloc(soa.Self(), c, 1));
+  a.reset(Array::Alloc<true>(soa.Self(), c, 1));
   ASSERT_TRUE(c == a->GetClass());
 
   c = class_linker_->FindSystemClass("[[Ljava/lang/Object;");
-  a.reset(Array::Alloc(soa.Self(), c, 1));
+  a.reset(Array::Alloc<true>(soa.Self(), c, 1));
   ASSERT_TRUE(c == a->GetClass());
 }
 
@@ -212,7 +221,8 @@ TEST_F(ObjectTest, CheckAndAllocArrayFromCode) {
       java_lang_dex_file_->GetIndexForStringId(*string_id));
   ASSERT_TRUE(type_id != NULL);
   uint32_t type_idx = java_lang_dex_file_->GetIndexForTypeId(*type_id);
-  Object* array = CheckAndAllocArrayFromCode(type_idx, sort, 3, Thread::Current(), false);
+  Object* array = CheckAndAllocArrayFromCodeInstrumented(type_idx, sort, 3, Thread::Current(), false,
+                                                         Runtime::Current()->GetHeap()->GetCurrentAllocator());
   EXPECT_TRUE(array->IsArrayInstance());
   EXPECT_EQ(3, array->AsArray()->GetLength());
   EXPECT_TRUE(array->GetClass()->IsArrayClass());
@@ -260,9 +270,10 @@ TEST_F(ObjectTest, StaticFieldFromCode) {
   const DexFile* dex_file = Runtime::Current()->GetCompileTimeClassPath(class_loader)[0];
   CHECK(dex_file != NULL);
 
+  SirtRef<mirror::ClassLoader> loader(soa.Self(), soa.Decode<ClassLoader*>(class_loader));
   Class* klass =
-      class_linker_->FindClass("LStaticsFromCode;", soa.Decode<ClassLoader*>(class_loader));
-  ArtMethod* clinit = klass->FindDirectMethod("<clinit>", "()V");
+      class_linker_->FindClass("LStaticsFromCode;", loader);
+  ArtMethod* clinit = klass->FindClassInitializer();
   const DexFile::StringId* klass_string_id = dex_file->FindStringId("LStaticsFromCode;");
   ASSERT_TRUE(klass_string_id != NULL);
   const DexFile::TypeId* klass_type_id = dex_file->FindTypeId(
@@ -283,8 +294,8 @@ TEST_F(ObjectTest, StaticFieldFromCode) {
   ASSERT_TRUE(field_id != NULL);
   uint32_t field_idx = dex_file->GetIndexForFieldId(*field_id);
 
-  ArtField* field = FindFieldFromCode(field_idx, clinit, Thread::Current(), StaticObjectRead,
-                                      sizeof(Object*), true);
+  ArtField* field = FindFieldFromCode<StaticObjectRead, true>(field_idx, clinit, Thread::Current(),
+                                                              sizeof(Object*));
   Object* s0 = field->GetObj(klass);
   EXPECT_TRUE(s0 != NULL);
 
@@ -383,6 +394,7 @@ TEST_F(ObjectTest, StringLength) {
 }
 
 TEST_F(ObjectTest, DescriptorCompare) {
+  // Two classloaders conflicts in compile_time_class_paths_.
   ScopedObjectAccess soa(Thread::Current());
   ClassLinker* linker = class_linker_;
 
@@ -391,9 +403,9 @@ TEST_F(ObjectTest, DescriptorCompare) {
   SirtRef<ClassLoader> class_loader_1(soa.Self(), soa.Decode<ClassLoader*>(jclass_loader_1));
   SirtRef<ClassLoader> class_loader_2(soa.Self(), soa.Decode<ClassLoader*>(jclass_loader_2));
 
-  Class* klass1 = linker->FindClass("LProtoCompare;", class_loader_1.get());
+  Class* klass1 = linker->FindClass("LProtoCompare;", class_loader_1);
   ASSERT_TRUE(klass1 != NULL);
-  Class* klass2 = linker->FindClass("LProtoCompare2;", class_loader_2.get());
+  Class* klass2 = linker->FindClass("LProtoCompare2;", class_loader_2);
   ASSERT_TRUE(klass2 != NULL);
 
   ArtMethod* m1_1 = klass1->GetVirtualMethod(0);
@@ -459,8 +471,8 @@ TEST_F(ObjectTest, InstanceOf) {
   jobject jclass_loader = LoadDex("XandY");
   SirtRef<ClassLoader> class_loader(soa.Self(), soa.Decode<ClassLoader*>(jclass_loader));
 
-  Class* X = class_linker_->FindClass("LX;", class_loader.get());
-  Class* Y = class_linker_->FindClass("LY;", class_loader.get());
+  Class* X = class_linker_->FindClass("LX;", class_loader);
+  Class* Y = class_linker_->FindClass("LY;", class_loader);
   ASSERT_TRUE(X != NULL);
   ASSERT_TRUE(Y != NULL);
 
@@ -492,8 +504,8 @@ TEST_F(ObjectTest, IsAssignableFrom) {
   ScopedObjectAccess soa(Thread::Current());
   jobject jclass_loader = LoadDex("XandY");
   SirtRef<ClassLoader> class_loader(soa.Self(), soa.Decode<ClassLoader*>(jclass_loader));
-  Class* X = class_linker_->FindClass("LX;", class_loader.get());
-  Class* Y = class_linker_->FindClass("LY;", class_loader.get());
+  Class* X = class_linker_->FindClass("LX;", class_loader);
+  Class* Y = class_linker_->FindClass("LY;", class_loader);
 
   EXPECT_TRUE(X->IsAssignableFrom(X));
   EXPECT_TRUE(X->IsAssignableFrom(Y));
@@ -529,17 +541,17 @@ TEST_F(ObjectTest, IsAssignableFromArray) {
   ScopedObjectAccess soa(Thread::Current());
   jobject jclass_loader = LoadDex("XandY");
   SirtRef<ClassLoader> class_loader(soa.Self(), soa.Decode<ClassLoader*>(jclass_loader));
-  Class* X = class_linker_->FindClass("LX;", class_loader.get());
-  Class* Y = class_linker_->FindClass("LY;", class_loader.get());
+  Class* X = class_linker_->FindClass("LX;", class_loader);
+  Class* Y = class_linker_->FindClass("LY;", class_loader);
   ASSERT_TRUE(X != NULL);
   ASSERT_TRUE(Y != NULL);
 
-  Class* YA = class_linker_->FindClass("[LY;", class_loader.get());
-  Class* YAA = class_linker_->FindClass("[[LY;", class_loader.get());
+  Class* YA = class_linker_->FindClass("[LY;", class_loader);
+  Class* YAA = class_linker_->FindClass("[[LY;", class_loader);
   ASSERT_TRUE(YA != NULL);
   ASSERT_TRUE(YAA != NULL);
 
-  Class* XAA = class_linker_->FindClass("[[LX;", class_loader.get());
+  Class* XAA = class_linker_->FindClass("[[LX;", class_loader);
   ASSERT_TRUE(XAA != NULL);
 
   Class* O = class_linker_->FindSystemClass("Ljava/lang/Object;");

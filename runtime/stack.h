@@ -68,8 +68,7 @@ class ShadowFrame {
   static ShadowFrame* Create(uint32_t num_vregs, ShadowFrame* link,
                              mirror::ArtMethod* method, uint32_t dex_pc) {
     uint8_t* memory = new uint8_t[ComputeSize(num_vregs)];
-    ShadowFrame* sf = new (memory) ShadowFrame(num_vregs, link, method, dex_pc, true);
-    return sf;
+    return Create(num_vregs, link, method, dex_pc, memory);
   }
 
   // Create ShadowFrame for interpreter using provided memory.
@@ -138,22 +137,41 @@ class ShadowFrame {
   int64_t GetVRegLong(size_t i) const {
     DCHECK_LT(i, NumberOfVRegs());
     const uint32_t* vreg = &vregs_[i];
-    return *reinterpret_cast<const int64_t*>(vreg);
+    // Alignment attribute required for GCC 4.8
+    typedef const int64_t unaligned_int64 __attribute__ ((aligned (4)));
+    return *reinterpret_cast<unaligned_int64*>(vreg);
   }
 
   double GetVRegDouble(size_t i) const {
     DCHECK_LT(i, NumberOfVRegs());
     const uint32_t* vreg = &vregs_[i];
-    return *reinterpret_cast<const double*>(vreg);
+    // Alignment attribute required for GCC 4.8
+    typedef const double unaligned_double __attribute__ ((aligned (4)));
+    return *reinterpret_cast<unaligned_double*>(vreg);
   }
 
+  template <bool kChecked = false>
   mirror::Object* GetVRegReference(size_t i) const {
     DCHECK_LT(i, NumberOfVRegs());
     if (HasReferenceArray()) {
-      return References()[i];
+      mirror::Object* ref = References()[i];
+      if (kChecked) {
+        CHECK(VerifyReference(ref)) << "VReg " << i << "(" << ref
+                                    << ") is in protected space, reference array " << true;
+      }
+      // If the vreg reference is not equal to the vreg then the vreg reference is stale.
+      if (UNLIKELY(reinterpret_cast<uint32_t>(ref) != vregs_[i])) {
+        return nullptr;
+      }
+      return ref;
     } else {
       const uint32_t* vreg = &vregs_[i];
-      return *reinterpret_cast<mirror::Object* const*>(vreg);
+      mirror::Object* ref = *reinterpret_cast<mirror::Object* const*>(vreg);
+      if (kChecked) {
+        CHECK(VerifyReference(ref)) << "VReg " << i
+            << "(" << ref << ") is in protected space, reference array " << false;
+      }
+      return ref;
     }
   }
 
@@ -166,28 +184,56 @@ class ShadowFrame {
     DCHECK_LT(i, NumberOfVRegs());
     uint32_t* vreg = &vregs_[i];
     *reinterpret_cast<int32_t*>(vreg) = val;
+    // This is needed for moving collectors since these can update the vreg references if they
+    // happen to agree with references in the reference array.
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i] = nullptr;
+    }
   }
 
   void SetVRegFloat(size_t i, float val) {
     DCHECK_LT(i, NumberOfVRegs());
     uint32_t* vreg = &vregs_[i];
     *reinterpret_cast<float*>(vreg) = val;
+    // This is needed for moving collectors since these can update the vreg references if they
+    // happen to agree with references in the reference array.
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i] = nullptr;
+    }
   }
 
   void SetVRegLong(size_t i, int64_t val) {
     DCHECK_LT(i, NumberOfVRegs());
     uint32_t* vreg = &vregs_[i];
-    *reinterpret_cast<int64_t*>(vreg) = val;
+    // Alignment attribute required for GCC 4.8
+    typedef int64_t unaligned_int64 __attribute__ ((aligned (4)));
+    *reinterpret_cast<unaligned_int64*>(vreg) = val;
+    // This is needed for moving collectors since these can update the vreg references if they
+    // happen to agree with references in the reference array.
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i] = nullptr;
+      References()[i + 1] = nullptr;
+    }
   }
 
   void SetVRegDouble(size_t i, double val) {
     DCHECK_LT(i, NumberOfVRegs());
     uint32_t* vreg = &vregs_[i];
-    *reinterpret_cast<double*>(vreg) = val;
+    // Alignment attribute required for GCC 4.8
+    typedef double unaligned_double __attribute__ ((aligned (4)));
+    *reinterpret_cast<unaligned_double*>(vreg) = val;
+    // This is needed for moving collectors since these can update the vreg references if they
+    // happen to agree with references in the reference array.
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i] = nullptr;
+      References()[i + 1] = nullptr;
+    }
   }
 
   void SetVRegReference(size_t i, mirror::Object* val) {
     DCHECK_LT(i, NumberOfVRegs());
+    DCHECK(!kMovingCollector || VerifyReference(val))
+        << "VReg " << i << "(" << val << ") is in protected space";
     uint32_t* vreg = &vregs_[i];
     *reinterpret_cast<mirror::Object**>(vreg) = val;
     if (HasReferenceArray()) {
@@ -267,6 +313,8 @@ class ShadowFrame {
     const uint32_t* vreg_end = &vregs_[NumberOfVRegs()];
     return reinterpret_cast<mirror::Object* const*>(vreg_end);
   }
+
+  bool VerifyReference(const mirror::Object* val) const;
 
   mirror::Object** References() {
     return const_cast<mirror::Object**>(const_cast<const ShadowFrame*>(this)->References());
@@ -459,13 +507,14 @@ class StackVisitor {
   uintptr_t GetGPR(uint32_t reg) const;
   void SetGPR(uint32_t reg, uintptr_t value);
 
-  uint32_t GetVReg(mirror::ArtMethod** cur_quick_frame, const DexFile::CodeItem* code_item,
+  // This is a fast-path for getting/setting values in a quick frame.
+  uint32_t* GetVRegAddr(mirror::ArtMethod** cur_quick_frame, const DexFile::CodeItem* code_item,
                    uint32_t core_spills, uint32_t fp_spills, size_t frame_size,
                    uint16_t vreg) const {
     int offset = GetVRegOffset(code_item, core_spills, fp_spills, frame_size, vreg);
     DCHECK_EQ(cur_quick_frame, GetCurrentQuickFrame());
     byte* vreg_addr = reinterpret_cast<byte*>(cur_quick_frame) + offset;
-    return *reinterpret_cast<uint32_t*>(vreg_addr);
+    return reinterpret_cast<uint32_t*>(vreg_addr);
   }
 
   uintptr_t GetReturnPc() const;
@@ -554,7 +603,7 @@ class StackVisitor {
   static void DescribeStack(Thread* thread) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
  private:
-  instrumentation::InstrumentationStackFrame GetInstrumentationStackFrame(uint32_t depth) const;
+  instrumentation::InstrumentationStackFrame& GetInstrumentationStackFrame(uint32_t depth) const;
 
   void SanityCheckFrame() const SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 

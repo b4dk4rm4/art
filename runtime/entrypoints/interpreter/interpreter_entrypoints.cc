@@ -31,7 +31,18 @@ extern "C" void artInterpreterToCompiledCodeBridge(Thread* self, MethodHelper& m
   mirror::ArtMethod* method = shadow_frame->GetMethod();
   // Ensure static methods are initialized.
   if (method->IsStatic()) {
-    Runtime::Current()->GetClassLinker()->EnsureInitialized(method->GetDeclaringClass(), true, true);
+    mirror::Class* declaringClass = method->GetDeclaringClass();
+    if (UNLIKELY(!declaringClass->IsInitializing())) {
+      self->PushShadowFrame(shadow_frame);
+      SirtRef<mirror::Class> sirt_c(self, declaringClass);
+      if (UNLIKELY(!Runtime::Current()->GetClassLinker()->EnsureInitialized(sirt_c, true, true))) {
+        self->PopShadowFrame();
+        DCHECK(self->IsExceptionPending());
+        return;
+      }
+      self->PopShadowFrame();
+      CHECK(sirt_c->IsInitializing());
+    }
   }
   uint16_t arg_offset = (code_item == NULL) ? 0 : code_item->registers_size_ - code_item->ins_size_;
 #if defined(ART_USE_PORTABLE_COMPILER)
@@ -40,7 +51,7 @@ extern "C" void artInterpreterToCompiledCodeBridge(Thread* self, MethodHelper& m
   method->Invoke(self, arg_array.GetArray(), arg_array.GetNumBytes(), result, mh.GetShorty()[0]);
 #else
   method->Invoke(self, shadow_frame->GetVRegArgs(arg_offset),
-                 (shadow_frame->NumberOfVRegs() - arg_offset) * 4,
+                 (shadow_frame->NumberOfVRegs() - arg_offset) * sizeof(uint32_t),
                  result, mh.GetShorty()[0]);
 #endif
 }

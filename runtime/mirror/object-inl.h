@@ -24,6 +24,7 @@
 #include "atomic.h"
 #include "array-inl.h"
 #include "class.h"
+#include "lock_word-inl.h"
 #include "monitor.h"
 #include "runtime.h"
 #include "throwable.h"
@@ -43,8 +44,21 @@ inline void Object::SetClass(Class* new_klass) {
   SetFieldPtr(OFFSET_OF_OBJECT_MEMBER(Object, klass_), new_klass, false, false);
 }
 
-inline uint32_t Object::GetThinLockId() {
-  return Monitor::GetThinLockId(monitor_);
+inline LockWord Object::GetLockWord() const {
+  return LockWord(GetField32(OFFSET_OF_OBJECT_MEMBER(Object, monitor_), true));
+}
+
+inline void Object::SetLockWord(LockWord new_val) {
+  SetField32(OFFSET_OF_OBJECT_MEMBER(Object, monitor_), new_val.GetValue(), true);
+}
+
+inline bool Object::CasLockWord(LockWord old_val, LockWord new_val) {
+  return CasField32(OFFSET_OF_OBJECT_MEMBER(Object, monitor_), old_val.GetValue(),
+                    new_val.GetValue());
+}
+
+inline uint32_t Object::GetLockOwnerThreadId() {
+  return Monitor::GetLockOwnerThreadId(this);
 }
 
 inline void Object::MonitorEnter(Thread* self) {
@@ -233,9 +247,46 @@ inline size_t Object::SizeOf() const {
   } else {
     result = GetClass()->GetObjectSize();
   }
+  DCHECK_GE(result, sizeof(Object)) << " class=" << PrettyTypeOf(GetClass());
   DCHECK(!IsArtField()  || result == sizeof(ArtField));
   DCHECK(!IsArtMethod() || result == sizeof(ArtMethod));
   return result;
+}
+
+inline uint32_t Object::GetField32(MemberOffset field_offset, bool is_volatile) const {
+  VerifyObject(this);
+  const byte* raw_addr = reinterpret_cast<const byte*>(this) + field_offset.Int32Value();
+  const int32_t* word_addr = reinterpret_cast<const int32_t*>(raw_addr);
+  if (UNLIKELY(is_volatile)) {
+    int32_t result = *(reinterpret_cast<volatile int32_t*>(const_cast<int32_t*>(word_addr)));
+    QuasiAtomic::MembarLoadLoad();
+    return result;
+  } else {
+    return *word_addr;
+  }
+}
+
+inline void Object::SetField32(MemberOffset field_offset, uint32_t new_value, bool is_volatile,
+                               bool this_is_valid) {
+  if (this_is_valid) {
+    VerifyObject(this);
+  }
+  byte* raw_addr = reinterpret_cast<byte*>(this) + field_offset.Int32Value();
+  uint32_t* word_addr = reinterpret_cast<uint32_t*>(raw_addr);
+  if (UNLIKELY(is_volatile)) {
+    QuasiAtomic::MembarStoreStore();  // Ensure this store occurs after others in the queue.
+    *word_addr = new_value;
+    QuasiAtomic::MembarStoreLoad();  // Ensure this store occurs before any loads.
+  } else {
+    *word_addr = new_value;
+  }
+}
+
+inline bool Object::CasField32(MemberOffset field_offset, uint32_t old_value, uint32_t new_value) {
+  VerifyObject(this);
+  byte* raw_addr = reinterpret_cast<byte*>(this) + field_offset.Int32Value();
+  volatile uint32_t* addr = reinterpret_cast<volatile uint32_t*>(raw_addr);
+  return __sync_bool_compare_and_swap(addr, old_value, new_value);
 }
 
 inline uint64_t Object::GetField64(MemberOffset field_offset, bool is_volatile) const {
@@ -244,7 +295,7 @@ inline uint64_t Object::GetField64(MemberOffset field_offset, bool is_volatile) 
   const int64_t* addr = reinterpret_cast<const int64_t*>(raw_addr);
   if (UNLIKELY(is_volatile)) {
     uint64_t result = QuasiAtomic::Read64(addr);
-    ANDROID_MEMBAR_FULL();
+    QuasiAtomic::MembarLoadLoad();
     return result;
   } else {
     return *addr;
@@ -256,9 +307,13 @@ inline void Object::SetField64(MemberOffset field_offset, uint64_t new_value, bo
   byte* raw_addr = reinterpret_cast<byte*>(this) + field_offset.Int32Value();
   int64_t* addr = reinterpret_cast<int64_t*>(raw_addr);
   if (UNLIKELY(is_volatile)) {
-    ANDROID_MEMBAR_STORE();
+    QuasiAtomic::MembarStoreStore();  // Ensure this store occurs after others in the queue.
     QuasiAtomic::Write64(addr, new_value);
-    // Post-store barrier not required due to use of atomic op or mutex.
+    if (!QuasiAtomic::LongAtomicsUseMutexes()) {
+      QuasiAtomic::MembarStoreLoad();  // Ensure this store occurs before any loads.
+    } else {
+      // Fence from from mutex is enough.
+    }
   } else {
     *addr = new_value;
   }

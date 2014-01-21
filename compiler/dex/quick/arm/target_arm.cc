@@ -74,6 +74,8 @@ int ArmMir2Lir::TargetReg(SpecialTargetRegister reg) {
     case kRet0: res = rARM_RET0; break;
     case kRet1: res = rARM_RET1; break;
     case kInvokeTgt: res = rARM_INVOKE_TGT; break;
+    case kHiddenArg: res = r12; break;
+    case kHiddenFpArg: res = INVALID_REG; break;
     case kCount: res = rARM_COUNT; break;
   }
   return res;
@@ -118,78 +120,83 @@ uint64_t ArmMir2Lir::GetPCUseDefEncoding() {
   return ENCODE_ARM_REG_PC;
 }
 
-void ArmMir2Lir::SetupTargetResourceMasks(LIR* lir) {
+// Thumb2 specific setup.  TODO: inline?:
+void ArmMir2Lir::SetupTargetResourceMasks(LIR* lir, uint64_t flags) {
   DCHECK_EQ(cu_->instruction_set, kThumb2);
+  DCHECK(!lir->flags.use_def_invalid);
 
-  // Thumb2 specific setup
-  uint64_t flags = ArmMir2Lir::EncodingMap[lir->opcode].flags;
   int opcode = lir->opcode;
 
-  if (flags & REG_DEF_SP) {
-    lir->def_mask |= ENCODE_ARM_REG_SP;
-  }
-
-  if (flags & REG_USE_SP) {
-    lir->use_mask |= ENCODE_ARM_REG_SP;
-  }
-
-  if (flags & REG_DEF_LIST0) {
-    lir->def_mask |= ENCODE_ARM_REG_LIST(lir->operands[0]);
-  }
-
-  if (flags & REG_DEF_LIST1) {
-    lir->def_mask |= ENCODE_ARM_REG_LIST(lir->operands[1]);
-  }
-
-  if (flags & REG_DEF_FPCS_LIST0) {
-    lir->def_mask |= ENCODE_ARM_REG_FPCS_LIST(lir->operands[0]);
-  }
-
-  if (flags & REG_DEF_FPCS_LIST2) {
-    for (int i = 0; i < lir->operands[2]; i++) {
-      SetupRegMask(&lir->def_mask, lir->operands[1] + i);
+  // These flags are somewhat uncommon - bypass if we can.
+  if ((flags & (REG_DEF_SP | REG_USE_SP | REG_DEF_LIST0 | REG_DEF_LIST1 |
+                REG_DEF_FPCS_LIST0 | REG_DEF_FPCS_LIST2 | REG_USE_PC | IS_IT | REG_USE_LIST0 |
+                REG_USE_LIST1 | REG_USE_FPCS_LIST0 | REG_USE_FPCS_LIST2 | REG_DEF_LR)) != 0) {
+    if (flags & REG_DEF_SP) {
+      lir->u.m.def_mask |= ENCODE_ARM_REG_SP;
     }
-  }
 
-  if (flags & REG_USE_PC) {
-    lir->use_mask |= ENCODE_ARM_REG_PC;
-  }
-
-  /* Conservatively treat the IT block */
-  if (flags & IS_IT) {
-    lir->def_mask = ENCODE_ALL;
-  }
-
-  if (flags & REG_USE_LIST0) {
-    lir->use_mask |= ENCODE_ARM_REG_LIST(lir->operands[0]);
-  }
-
-  if (flags & REG_USE_LIST1) {
-    lir->use_mask |= ENCODE_ARM_REG_LIST(lir->operands[1]);
-  }
-
-  if (flags & REG_USE_FPCS_LIST0) {
-    lir->use_mask |= ENCODE_ARM_REG_FPCS_LIST(lir->operands[0]);
-  }
-
-  if (flags & REG_USE_FPCS_LIST2) {
-    for (int i = 0; i < lir->operands[2]; i++) {
-      SetupRegMask(&lir->use_mask, lir->operands[1] + i);
+    if (flags & REG_USE_SP) {
+      lir->u.m.use_mask |= ENCODE_ARM_REG_SP;
     }
-  }
-  /* Fixup for kThumbPush/lr and kThumbPop/pc */
-  if (opcode == kThumbPush || opcode == kThumbPop) {
-    uint64_t r8Mask = GetRegMaskCommon(r8);
-    if ((opcode == kThumbPush) && (lir->use_mask & r8Mask)) {
-      lir->use_mask &= ~r8Mask;
-      lir->use_mask |= ENCODE_ARM_REG_LR;
-    } else if ((opcode == kThumbPop) && (lir->def_mask & r8Mask)) {
-      lir->def_mask &= ~r8Mask;
-      lir->def_mask |= ENCODE_ARM_REG_PC;
+
+    if (flags & REG_DEF_LIST0) {
+      lir->u.m.def_mask |= ENCODE_ARM_REG_LIST(lir->operands[0]);
     }
-  }
-  if (flags & REG_DEF_LR) {
-    lir->def_mask |= ENCODE_ARM_REG_LR;
+
+    if (flags & REG_DEF_LIST1) {
+      lir->u.m.def_mask |= ENCODE_ARM_REG_LIST(lir->operands[1]);
+    }
+
+    if (flags & REG_DEF_FPCS_LIST0) {
+      lir->u.m.def_mask |= ENCODE_ARM_REG_FPCS_LIST(lir->operands[0]);
+    }
+
+    if (flags & REG_DEF_FPCS_LIST2) {
+      for (int i = 0; i < lir->operands[2]; i++) {
+        SetupRegMask(&lir->u.m.def_mask, lir->operands[1] + i);
+      }
+    }
+
+    if (flags & REG_USE_PC) {
+      lir->u.m.use_mask |= ENCODE_ARM_REG_PC;
+    }
+
+    /* Conservatively treat the IT block */
+    if (flags & IS_IT) {
+      lir->u.m.def_mask = ENCODE_ALL;
+    }
+
+    if (flags & REG_USE_LIST0) {
+      lir->u.m.use_mask |= ENCODE_ARM_REG_LIST(lir->operands[0]);
+    }
+
+    if (flags & REG_USE_LIST1) {
+      lir->u.m.use_mask |= ENCODE_ARM_REG_LIST(lir->operands[1]);
+    }
+
+    if (flags & REG_USE_FPCS_LIST0) {
+      lir->u.m.use_mask |= ENCODE_ARM_REG_FPCS_LIST(lir->operands[0]);
+    }
+
+    if (flags & REG_USE_FPCS_LIST2) {
+      for (int i = 0; i < lir->operands[2]; i++) {
+        SetupRegMask(&lir->u.m.use_mask, lir->operands[1] + i);
+      }
+    }
+    /* Fixup for kThumbPush/lr and kThumbPop/pc */
+    if (opcode == kThumbPush || opcode == kThumbPop) {
+      uint64_t r8Mask = GetRegMaskCommon(r8);
+      if ((opcode == kThumbPush) && (lir->u.m.use_mask & r8Mask)) {
+        lir->u.m.use_mask &= ~r8Mask;
+        lir->u.m.use_mask |= ENCODE_ARM_REG_LR;
+      } else if ((opcode == kThumbPop) && (lir->u.m.def_mask & r8Mask)) {
+        lir->u.m.def_mask &= ~r8Mask;
+        lir->u.m.def_mask |= ENCODE_ARM_REG_PC;
+      }
+    }
+    if (flags & REG_DEF_LR) {
+      lir->u.m.def_mask |= ENCODE_ARM_REG_LR;
+    }
   }
 }
 
@@ -200,6 +207,8 @@ ArmConditionCode ArmMir2Lir::ArmConditionEncoding(ConditionCode ccode) {
     case kCondNe: res = kArmCondNe; break;
     case kCondCs: res = kArmCondCs; break;
     case kCondCc: res = kArmCondCc; break;
+    case kCondUlt: res = kArmCondCc; break;
+    case kCondUge: res = kArmCondCs; break;
     case kCondMi: res = kArmCondMi; break;
     case kCondPl: res = kArmCondPl; break;
     case kCondVs: res = kArmCondVs; break;
@@ -246,7 +255,7 @@ static const char* shift_names[4] = {
   "ror"};
 
 /* Decode and print a ARM register name */
-static char* DecodeRegList(int opcode, int vector, char* buf) {
+static char* DecodeRegList(int opcode, int vector, char* buf, size_t buf_size) {
   int i;
   bool printed = false;
   buf[0] = 0;
@@ -259,26 +268,26 @@ static char* DecodeRegList(int opcode, int vector, char* buf) {
         reg_id = r15pc;
       }
       if (printed) {
-        sprintf(buf + strlen(buf), ", r%d", reg_id);
+        snprintf(buf + strlen(buf), buf_size - strlen(buf), ", r%d", reg_id);
       } else {
         printed = true;
-        sprintf(buf, "r%d", reg_id);
+        snprintf(buf, buf_size, "r%d", reg_id);
       }
     }
   }
   return buf;
 }
 
-static char*  DecodeFPCSRegList(int count, int base, char* buf) {
-  sprintf(buf, "s%d", base);
+static char*  DecodeFPCSRegList(int count, int base, char* buf, size_t buf_size) {
+  snprintf(buf, buf_size, "s%d", base);
   for (int i = 1; i < count; i++) {
-    sprintf(buf + strlen(buf), ", s%d", base + i);
+    snprintf(buf + strlen(buf), buf_size - strlen(buf), ", s%d", base + i);
   }
   return buf;
 }
 
-static int ExpandImmediate(int value) {
-  int mode = (value & 0xf00) >> 8;
+static int32_t ExpandImmediate(int value) {
+  int32_t mode = (value & 0xf00) >> 8;
   uint32_t bits = value & 0xff;
   switch (mode) {
     case 0:
@@ -324,7 +333,7 @@ std::string ArmMir2Lir::BuildInsnString(const char* fmt, LIR* lir, unsigned char
          switch (*fmt++) {
            case 'H':
              if (operand != 0) {
-               sprintf(tbuf, ", %s %d", shift_names[operand & 0x3], operand >> 2);
+               snprintf(tbuf, arraysize(tbuf), ", %s %d", shift_names[operand & 0x3], operand >> 2);
              } else {
                strcpy(tbuf, "");
              }
@@ -364,41 +373,41 @@ std::string ArmMir2Lir::BuildInsnString(const char* fmt, LIR* lir, unsigned char
              break;
            case 'n':
              operand = ~ExpandImmediate(operand);
-             sprintf(tbuf, "%d [%#x]", operand, operand);
+             snprintf(tbuf, arraysize(tbuf), "%d [%#x]", operand, operand);
              break;
            case 'm':
              operand = ExpandImmediate(operand);
-             sprintf(tbuf, "%d [%#x]", operand, operand);
+             snprintf(tbuf, arraysize(tbuf), "%d [%#x]", operand, operand);
              break;
            case 's':
-             sprintf(tbuf, "s%d", operand & ARM_FP_REG_MASK);
+             snprintf(tbuf, arraysize(tbuf), "s%d", operand & ARM_FP_REG_MASK);
              break;
            case 'S':
-             sprintf(tbuf, "d%d", (operand & ARM_FP_REG_MASK) >> 1);
+             snprintf(tbuf, arraysize(tbuf), "d%d", (operand & ARM_FP_REG_MASK) >> 1);
              break;
            case 'h':
-             sprintf(tbuf, "%04x", operand);
+             snprintf(tbuf, arraysize(tbuf), "%04x", operand);
              break;
            case 'M':
            case 'd':
-             sprintf(tbuf, "%d", operand);
+             snprintf(tbuf, arraysize(tbuf), "%d", operand);
              break;
            case 'C':
              DCHECK_LT(operand, static_cast<int>(
                  sizeof(core_reg_names)/sizeof(core_reg_names[0])));
-             sprintf(tbuf, "%s", core_reg_names[operand]);
+             snprintf(tbuf, arraysize(tbuf), "%s", core_reg_names[operand]);
              break;
            case 'E':
-             sprintf(tbuf, "%d", operand*4);
+             snprintf(tbuf, arraysize(tbuf), "%d", operand*4);
              break;
            case 'F':
-             sprintf(tbuf, "%d", operand*2);
+             snprintf(tbuf, arraysize(tbuf), "%d", operand*2);
              break;
            case 'c':
              strcpy(tbuf, cc_names[operand]);
              break;
            case 't':
-             sprintf(tbuf, "0x%08x (L%p)",
+             snprintf(tbuf, arraysize(tbuf), "0x%08x (L%p)",
                  reinterpret_cast<uintptr_t>(base_addr) + lir->offset + 4 +
                  (operand << 1),
                  lir->target);
@@ -410,7 +419,7 @@ std::string ArmMir2Lir::BuildInsnString(const char* fmt, LIR* lir, unsigned char
                  (((reinterpret_cast<uintptr_t>(base_addr) + lir->offset + 4) &
                  ~3) + (offset_1 << 21 >> 9) + (offset_2 << 1)) &
                  0xfffffffc;
-             sprintf(tbuf, "%p", reinterpret_cast<void *>(target));
+             snprintf(tbuf, arraysize(tbuf), "%p", reinterpret_cast<void *>(target));
              break;
           }
 
@@ -419,13 +428,13 @@ std::string ArmMir2Lir::BuildInsnString(const char* fmt, LIR* lir, unsigned char
              strcpy(tbuf, "see above");
              break;
            case 'R':
-             DecodeRegList(lir->opcode, operand, tbuf);
+             DecodeRegList(lir->opcode, operand, tbuf, arraysize(tbuf));
              break;
            case 'P':
-             DecodeFPCSRegList(operand, 16, tbuf);
+             DecodeFPCSRegList(operand, 16, tbuf, arraysize(tbuf));
              break;
            case 'Q':
-             DecodeFPCSRegList(operand, 0, tbuf);
+             DecodeFPCSRegList(operand, 0, tbuf, arraysize(tbuf));
              break;
            default:
              strcpy(tbuf, "DecodeError1");
@@ -452,7 +461,7 @@ void ArmMir2Lir::DumpResourceMask(LIR* arm_lir, uint64_t mask, const char* prefi
 
     for (i = 0; i < kArmRegEnd; i++) {
       if (mask & (1ULL << i)) {
-        sprintf(num, "%d ", i);
+        snprintf(num, arraysize(num), "%d ", i);
         strcat(buf, num);
       }
     }
@@ -466,8 +475,9 @@ void ArmMir2Lir::DumpResourceMask(LIR* arm_lir, uint64_t mask, const char* prefi
 
     /* Memory bits */
     if (arm_lir && (mask & ENCODE_DALVIK_REG)) {
-      sprintf(buf + strlen(buf), "dr%d%s", arm_lir->alias_info & 0xffff,
-              (arm_lir->alias_info & 0x80000000) ? "(+1)" : "");
+      snprintf(buf + strlen(buf), arraysize(buf) - strlen(buf), "dr%d%s",
+               DECODE_ALIAS_INFO_REG(arm_lir->flags.alias_info),
+               DECODE_ALIAS_INFO_WIDE(arm_lir->flags.alias_info) ? "(+1)" : "");
     }
     if (mask & ENCODE_LITERAL) {
       strcat(buf, "lit ");
@@ -646,7 +656,7 @@ bool ArmMir2Lir::IsFpReg(int reg) {
 }
 
 /* Clobber all regs that might be used by an external C call */
-void ArmMir2Lir::ClobberCalleeSave() {
+void ArmMir2Lir::ClobberCallerSave() {
   Clobber(r0);
   Clobber(r1);
   Clobber(r2);
@@ -691,11 +701,6 @@ RegLocation ArmMir2Lir::GetReturnAlt() {
   return res;
 }
 
-ArmMir2Lir::RegisterInfo* ArmMir2Lir::GetRegInfo(int reg) {
-  return ARM_FPREG(reg) ? &reg_pool_->FPRegs[reg & ARM_FP_REG_MASK]
-      : &reg_pool_->core_regs[reg];
-}
-
 /* To be used when explicitly managing register use */
 void ArmMir2Lir::LockCallTemps() {
   LockTemp(r0);
@@ -718,14 +723,17 @@ int ArmMir2Lir::LoadHelper(ThreadOffset offset) {
 }
 
 uint64_t ArmMir2Lir::GetTargetInstFlags(int opcode) {
+  DCHECK(!IsPseudoLirOp(opcode));
   return ArmMir2Lir::EncodingMap[opcode].flags;
 }
 
 const char* ArmMir2Lir::GetTargetInstName(int opcode) {
+  DCHECK(!IsPseudoLirOp(opcode));
   return ArmMir2Lir::EncodingMap[opcode].name;
 }
 
 const char* ArmMir2Lir::GetTargetInstFmt(int opcode) {
+  DCHECK(!IsPseudoLirOp(opcode));
   return ArmMir2Lir::EncodingMap[opcode].fmt;
 }
 

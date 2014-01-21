@@ -37,7 +37,12 @@ enum LockLevel {
   kThreadSuspendCountLock,
   kAbortLock,
   kJdwpSocketLock,
+  kRosAllocGlobalLock,
+  kRosAllocBracketLock,
+  kRosAllocBulkFreeLock,
   kAllocSpaceLock,
+  kDexFileMethodInlinerLock,
+  kDexFileToMethodInlinerMapLock,
   kMarkSweepMarkStackLock,
   kDefaultMutexLevel,
   kMarkSweepLargeObjectLock,
@@ -46,15 +51,17 @@ enum LockLevel {
   kJdwpObjectRegistryLock,
   kClassLinkerClassesLock,
   kBreakpointLock,
+  kMonitorLock,
   kThreadListLock,
   kBreakpointInvokeLock,
+  kDeoptimizationLock,
   kTraceLock,
+  kProfilerLock,
   kJdwpEventListLock,
   kJdwpAttachLock,
   kJdwpStartLock,
   kRuntimeShutdownLock,
   kHeapBitmapLock,
-  kMonitorLock,
   kMutatorLock,
   kZygoteCreationLock,
 
@@ -137,14 +144,20 @@ class Locks {
   // attaching and detaching.
   static Mutex* thread_list_lock_ ACQUIRED_AFTER(runtime_shutdown_lock_);
 
-  // Guards breakpoints and single-stepping.
+  // Guards breakpoints.
   static Mutex* breakpoint_lock_ ACQUIRED_AFTER(thread_list_lock_);
 
+  // Guards deoptimization requests.
+  static Mutex* deoptimization_lock_ ACQUIRED_AFTER(breakpoint_lock_);
+
   // Guards trace requests.
-  static Mutex* trace_lock_ ACQUIRED_AFTER(breakpoint_lock_);
+  static Mutex* trace_lock_ ACQUIRED_AFTER(deoptimization_lock_);
+
+  // Guards profile objects.
+  static Mutex* profiler_lock_ ACQUIRED_AFTER(trace_lock_);
 
   // Guards lists of classes within the class linker.
-  static ReaderWriterMutex* classlinker_classes_lock_ ACQUIRED_AFTER(trace_lock_);
+  static ReaderWriterMutex* classlinker_classes_lock_ ACQUIRED_AFTER(profiler_lock_);
 
   // When declaring any Mutex add DEFAULT_MUTEX_ACQUIRED_AFTER to use annotalysis to check the code
   // doesn't try to hold a higher level Mutex.

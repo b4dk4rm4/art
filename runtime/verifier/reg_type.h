@@ -20,6 +20,7 @@
 #include "base/macros.h"
 #include "globals.h"
 #include "primitive.h"
+#include "root_visitor.h"
 
 #include "jni.h"
 
@@ -269,6 +270,8 @@ class RegType {
 
   virtual ~RegType() {}
 
+  void VisitRoots(RootVisitor* visitor, void* arg) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
  protected:
   RegType(mirror::Class* klass, const std::string& descriptor, uint16_t cache_id)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
@@ -282,7 +285,7 @@ class RegType {
 
 
   const std::string descriptor_;
-  mirror::Class* const klass_;
+  mirror::Class* klass_;  // Non-const only due to moving classes.
   const uint16_t cache_id_;
 
   friend class RegTypeCache;
@@ -574,9 +577,12 @@ class ConstantType : public RegType {
 
   // If this is a 32-bit constant, what is the value? This value may be imprecise in which case
   // the value represents part of the integer range of values that may be held in the register.
-  virtual int32_t ConstantValue() const;
-  virtual int32_t ConstantValueLo() const;
-  virtual int32_t ConstantValueHi() const;
+  int32_t ConstantValue() const {
+    DCHECK(IsConstantTypes());
+    return constant_;
+  }
+  int32_t ConstantValueLo() const;
+  int32_t ConstantValueHi() const;
 
   bool IsZero() const {
     return IsPreciseConstant() && ConstantValue() == 0;

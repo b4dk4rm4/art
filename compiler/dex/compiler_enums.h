@@ -44,6 +44,8 @@ enum SpecialTargetRegister {
   kRet0,
   kRet1,
   kInvokeTgt,
+  kHiddenArg,
+  kHiddenFpArg,
   kCount
 };
 
@@ -54,7 +56,19 @@ enum RegLocationType {
   kLocInvalid
 };
 
+/**
+ * Support for vector registers.  Initially used for x86 floats.  This will be used
+ * to replace the assumption that a double takes up 2 single FP registers
+ */
+enum VectorLengthType {
+  kVectorNotUsed = 0,   // This value is NOT in a vector register.
+  kVectorLength4,       // The value occupies 4 bytes in a vector register.
+  kVectorLength8,       // The value occupies 8 bytes in a vector register.
+  kVectorLength16       // The value occupies 16 bytes in a vector register (unused now).
+};
+
 enum BBType {
+  kNullBlock,
   kEntryBlock,
   kDalvikByteCode,
   kExitBlock,
@@ -158,6 +172,7 @@ std::ostream& operator<<(std::ostream& os, const OpSize& kind);
 
 enum OpKind {
   kOpMov,
+  kOpCmov,
   kOpMvn,
   kOpCmp,
   kOpLsl,
@@ -180,6 +195,8 @@ enum OpKind {
   kOpBic,
   kOpCmn,
   kOpTst,
+  kOpRev,
+  kOpRevsh,
   kOpBkpt,
   kOpBlx,
   kOpPush,
@@ -198,10 +215,10 @@ std::ostream& operator<<(std::ostream& os, const OpKind& kind);
 enum ConditionCode {
   kCondEq,  // equal
   kCondNe,  // not equal
-  kCondCs,  // carry set (unsigned less than)
-  kCondUlt = kCondCs,
-  kCondCc,  // carry clear (unsigned greater than or same)
-  kCondUge = kCondCc,
+  kCondCs,  // carry set
+  kCondCc,  // carry clear
+  kCondUlt,  // unsigned less than
+  kCondUge,  // unsigned greater than or same
   kCondMi,  // minus
   kCondPl,  // plus, positive or zero
   kCondVs,  // overflow
@@ -297,27 +314,6 @@ enum ThrowKind {
   kThrowStackOverflow,
 };
 
-enum SpecialCaseHandler {
-  kNoHandler,
-  kNullMethod,
-  kConstFunction,
-  kIGet,
-  kIGetBoolean,
-  kIGetObject,
-  kIGetByte,
-  kIGetChar,
-  kIGetShort,
-  kIGetWide,
-  kIPut,
-  kIPutBoolean,
-  kIPutObject,
-  kIPutByte,
-  kIPutChar,
-  kIPutShort,
-  kIPutWide,
-  kIdentity,
-};
-
 enum DividePattern {
   DivideNone,
   Divide3,
@@ -369,6 +365,7 @@ enum OpFeatureFlags {
   kRegUseA,
   kRegUseC,
   kRegUseD,
+  kRegUseB,
   kRegUseFPCSList0,
   kRegUseFPCSList2,
   kRegUseList0,
@@ -411,6 +408,27 @@ enum OatBitMapKind {
 };
 
 std::ostream& operator<<(std::ostream& os, const OatBitMapKind& kind);
+
+// LIR fixup kinds for Arm
+enum FixupKind {
+  kFixupNone,
+  kFixupLabel,       // For labels we just adjust the offset.
+  kFixupLoad,        // Mostly for imediates.
+  kFixupVLoad,       // FP load which *may* be pc-relative.
+  kFixupCBxZ,        // Cbz, Cbnz.
+  kFixupPushPop,     // Not really pc relative, but changes size based on args.
+  kFixupCondBranch,  // Conditional branch
+  kFixupT1Branch,    // Thumb1 Unconditional branch
+  kFixupT2Branch,    // Thumb2 Unconditional branch
+  kFixupBlx1,        // Blx1 (start of Blx1/Blx2 pair).
+  kFixupBl1,         // Bl1 (start of Bl1/Bl2 pair).
+  kFixupAdr,         // Adr.
+  kFixupMovImmLST,   // kThumb2MovImm16LST.
+  kFixupMovImmHST,   // kThumb2MovImm16HST.
+  kFixupAlign4,      // Align to 4-byte boundary.
+};
+
+std::ostream& operator<<(std::ostream& os, const FixupKind& kind);
 
 }  // namespace art
 

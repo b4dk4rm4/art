@@ -32,18 +32,9 @@ extern "C" void artInterpreterToCompiledCodeBridge(Thread* self, MethodHelper& m
 extern "C" void art_portable_resolution_trampoline(mirror::ArtMethod*);
 extern "C" void art_portable_to_interpreter_bridge(mirror::ArtMethod*);
 
-// Alloc entrypoints.
-extern "C" void* art_quick_alloc_array(uint32_t, void*, int32_t);
-extern "C" void* art_quick_alloc_array_with_access_check(uint32_t, void*, int32_t);
-extern "C" void* art_quick_alloc_object(uint32_t type_idx, void* method);
-extern "C" void* art_quick_alloc_object_with_access_check(uint32_t type_idx, void* method);
-extern "C" void* art_quick_check_and_alloc_array(uint32_t, void*, int32_t);
-extern "C" void* art_quick_check_and_alloc_array_with_access_check(uint32_t, void*, int32_t);
-
 // Cast entrypoints.
 extern "C" uint32_t art_quick_is_assignable(const mirror::Class* klass,
                                                 const mirror::Class* ref_class);
-extern "C" void art_quick_can_put_array_element(void*, void*);
 extern "C" void art_quick_check_cast(void*, void*);
 
 // DexCache entrypoints.
@@ -66,7 +57,10 @@ extern "C" int64_t art_quick_get64_static(uint32_t);
 extern "C" void* art_quick_get_obj_instance(uint32_t, void*);
 extern "C" void* art_quick_get_obj_static(uint32_t);
 
-// FillArray entrypoint.
+// Array entrypoints.
+extern "C" void art_quick_aput_obj_with_null_and_bound_check(void*, uint32_t, void*);
+extern "C" void art_quick_aput_obj_with_bound_check(void*, uint32_t, void*);
+extern "C" void art_quick_aput_obj(void*, uint32_t, void*);
 extern "C" void art_quick_handle_fill_data(void*, void*);
 
 // Lock entrypoints.
@@ -82,7 +76,7 @@ extern "C" int64_t art_quick_d2l(double);
 extern "C" int64_t art_quick_f2l(float);
 extern "C" int32_t art_quick_idivmod(int32_t, int32_t);
 extern "C" int64_t art_quick_ldiv(int64_t, int64_t);
-extern "C" int64_t art_quick_ldivmod(int64_t, int64_t);
+extern "C" int64_t art_quick_lmod(int64_t, int64_t);
 extern "C" int64_t art_quick_lmul(int64_t, int64_t);
 extern "C" uint64_t art_quick_lshl(uint64_t, uint32_t);
 extern "C" uint64_t art_quick_lshr(uint64_t, uint32_t);
@@ -95,10 +89,10 @@ extern "C" int32_t art_quick_string_compareto(void*, void*);
 extern "C" void* art_quick_memcpy(void*, const void*, size_t);
 
 // Invoke entrypoints.
+extern "C" void art_quick_imt_conflict_trampoline(mirror::ArtMethod*);
 extern "C" void art_quick_resolution_trampoline(mirror::ArtMethod*);
 extern "C" void art_quick_to_interpreter_bridge(mirror::ArtMethod*);
 extern "C" void art_quick_invoke_direct_trampoline_with_access_check(uint32_t, void*);
-extern "C" void art_quick_invoke_interface_trampoline(uint32_t, void*);
 extern "C" void art_quick_invoke_interface_trampoline_with_access_check(uint32_t, void*);
 extern "C" void art_quick_invoke_static_trampoline_with_access_check(uint32_t, void*);
 extern "C" void art_quick_invoke_super_trampoline_with_access_check(uint32_t, void*);
@@ -116,6 +110,8 @@ extern "C" void art_quick_throw_no_such_method(int32_t method_idx);
 extern "C" void art_quick_throw_null_pointer_exception();
 extern "C" void art_quick_throw_stack_overflow(void*);
 
+extern void ResetQuickAllocEntryPoints(QuickEntryPoints* qpoints);
+
 void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
                      PortableEntryPoints* ppoints, QuickEntryPoints* qpoints) {
   // Interpreter
@@ -130,16 +126,10 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   ppoints->pPortableToInterpreterBridge = art_portable_to_interpreter_bridge;
 
   // Alloc
-  qpoints->pAllocArray = art_quick_alloc_array;
-  qpoints->pAllocArrayWithAccessCheck = art_quick_alloc_array_with_access_check;
-  qpoints->pAllocObject = art_quick_alloc_object;
-  qpoints->pAllocObjectWithAccessCheck = art_quick_alloc_object_with_access_check;
-  qpoints->pCheckAndAllocArray = art_quick_check_and_alloc_array;
-  qpoints->pCheckAndAllocArrayWithAccessCheck = art_quick_check_and_alloc_array_with_access_check;
+  ResetQuickAllocEntryPoints(qpoints);
 
   // Cast
   qpoints->pInstanceofNonTrivial = art_quick_is_assignable;
-  qpoints->pCanPutArrayElement = art_quick_can_put_array_element;
   qpoints->pCheckCast = art_quick_check_cast;
 
   // DexCache
@@ -162,7 +152,10 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   qpoints->pGet64Static = art_quick_get64_static;
   qpoints->pGetObjStatic = art_quick_get_obj_static;
 
-  // FillArray
+  // Array
+  qpoints->pAputObjectWithNullAndBoundCheck = art_quick_aput_obj_with_null_and_bound_check;
+  qpoints->pAputObjectWithBoundCheck = art_quick_aput_obj_with_bound_check;
+  qpoints->pAputObject = art_quick_aput_obj;
   qpoints->pHandleFillArrayData = art_quick_handle_fill_data;
 
   // JNI
@@ -183,6 +176,7 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   // points->pCmplDouble = NULL;  // Not needed on x86.
   // points->pCmplFloat = NULL;  // Not needed on x86.
   qpoints->pFmod = art_quick_fmod;
+  // qpoints->pSqrt = NULL;  // Not needed on x86.
   qpoints->pL2d = art_quick_l2d;
   qpoints->pFmodf = art_quick_fmodf;
   qpoints->pL2f = art_quick_l2f;
@@ -192,7 +186,7 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   qpoints->pD2l = art_quick_d2l;
   qpoints->pF2l = art_quick_f2l;
   qpoints->pLdiv = art_quick_ldiv;
-  qpoints->pLdivmod = art_quick_ldivmod;
+  qpoints->pLmod = art_quick_lmod;
   qpoints->pLmul = art_quick_lmul;
   qpoints->pShlLong = art_quick_lshl;
   qpoints->pShrLong = art_quick_lshr;
@@ -205,10 +199,10 @@ void InitEntryPoints(InterpreterEntryPoints* ipoints, JniEntryPoints* jpoints,
   qpoints->pMemcpy = art_quick_memcpy;
 
   // Invocation
+  qpoints->pQuickImtConflictTrampoline = art_quick_imt_conflict_trampoline;
   qpoints->pQuickResolutionTrampoline = art_quick_resolution_trampoline;
   qpoints->pQuickToInterpreterBridge = art_quick_to_interpreter_bridge;
   qpoints->pInvokeDirectTrampolineWithAccessCheck = art_quick_invoke_direct_trampoline_with_access_check;
-  qpoints->pInvokeInterfaceTrampoline = art_quick_invoke_interface_trampoline;
   qpoints->pInvokeInterfaceTrampolineWithAccessCheck = art_quick_invoke_interface_trampoline_with_access_check;
   qpoints->pInvokeStaticTrampolineWithAccessCheck = art_quick_invoke_static_trampoline_with_access_check;
   qpoints->pInvokeSuperTrampolineWithAccessCheck = art_quick_invoke_super_trampoline_with_access_check;

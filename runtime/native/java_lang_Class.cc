@@ -24,13 +24,14 @@
 #include "mirror/proxy.h"
 #include "object_utils.h"
 #include "scoped_thread_state_change.h"
+#include "scoped_fast_native_object_access.h"
 #include "ScopedLocalRef.h"
 #include "ScopedUtfChars.h"
 #include "well_known_classes.h"
 
 namespace art {
 
-static mirror::Class* DecodeClass(const ScopedObjectAccess& soa, jobject java_class)
+static mirror::Class* DecodeClass(const ScopedFastNativeObjectAccess& soa, jobject java_class)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   mirror::Class* c = soa.Decode<mirror::Class*>(java_class);
   DCHECK(c != NULL);
@@ -45,8 +46,8 @@ static mirror::Class* DecodeClass(const ScopedObjectAccess& soa, jobject java_cl
 static jclass Class_classForName(JNIEnv* env, jclass, jstring javaName, jboolean initialize, jobject javaLoader) {
   ScopedObjectAccess soa(env);
   ScopedUtfChars name(env, javaName);
-  if (name.c_str() == NULL) {
-    return NULL;
+  if (name.c_str() == nullptr) {
+    return nullptr;
   }
 
   // We need to validate and convert the name (from x.y.z to x/y/z).  This
@@ -56,36 +57,37 @@ static jclass Class_classForName(JNIEnv* env, jclass, jstring javaName, jboolean
     ThrowLocation throw_location = soa.Self()->GetCurrentLocationForThrow();
     soa.Self()->ThrowNewExceptionF(throw_location, "Ljava/lang/ClassNotFoundException;",
                                    "Invalid name: %s", name.c_str());
-    return NULL;
+    return nullptr;
   }
 
   std::string descriptor(DotToDescriptor(name.c_str()));
-  mirror::ClassLoader* class_loader = soa.Decode<mirror::ClassLoader*>(javaLoader);
+  SirtRef<mirror::ClassLoader> class_loader(soa.Self(),
+                                            soa.Decode<mirror::ClassLoader*>(javaLoader));
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  mirror::Class* c = class_linker->FindClass(descriptor.c_str(), class_loader);
-  if (c == NULL) {
+  SirtRef<mirror::Class> c(soa.Self(), class_linker->FindClass(descriptor.c_str(), class_loader));
+  if (c.get() == nullptr) {
     ScopedLocalRef<jthrowable> cause(env, env->ExceptionOccurred());
     env->ExceptionClear();
     jthrowable cnfe = reinterpret_cast<jthrowable>(env->NewObject(WellKnownClasses::java_lang_ClassNotFoundException,
                                                                   WellKnownClasses::java_lang_ClassNotFoundException_init,
                                                                   javaName, cause.get()));
     env->Throw(cnfe);
-    return NULL;
+    return nullptr;
   }
   if (initialize) {
     class_linker->EnsureInitialized(c, true, true);
   }
-  return soa.AddLocalReference<jclass>(c);
+  return soa.AddLocalReference<jclass>(c.get());
 }
 
 static jstring Class_getNameNative(JNIEnv* env, jobject javaThis) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   mirror::Class* c = DecodeClass(soa, javaThis);
   return soa.AddLocalReference<jstring>(c->ComputeName());
 }
 
 static jobjectArray Class_getProxyInterfaces(JNIEnv* env, jobject javaThis) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   mirror::SynthesizedProxyClass* c =
       down_cast<mirror::SynthesizedProxyClass*>(DecodeClass(soa, javaThis));
   return soa.AddLocalReference<jobjectArray>(c->GetInterfaces()->Clone(soa.Self()));
@@ -93,8 +95,8 @@ static jobjectArray Class_getProxyInterfaces(JNIEnv* env, jobject javaThis) {
 
 static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(Class, classForName, "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"),
-  NATIVE_METHOD(Class, getNameNative, "()Ljava/lang/String;"),
-  NATIVE_METHOD(Class, getProxyInterfaces, "()[Ljava/lang/Class;"),
+  NATIVE_METHOD(Class, getNameNative, "!()Ljava/lang/String;"),
+  NATIVE_METHOD(Class, getProxyInterfaces, "!()[Ljava/lang/Class;"),
 };
 
 void register_java_lang_Class(JNIEnv* env) {

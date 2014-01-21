@@ -17,6 +17,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <vector>
 
 #include "jni.h"
 
@@ -67,6 +68,42 @@ extern "C" JNIEXPORT void JNICALL Java_JniTest_testFindClassOnAttachedNativeThre
   assert(pthread_join_result == 0);
 }
 
+static void* testFindFieldOnAttachedNativeThread(void*) {
+  assert(jvm != NULL);
+
+  JNIEnv* env = NULL;
+  JavaVMAttachArgs args = { JNI_VERSION_1_6, __FUNCTION__, NULL };
+  int attach_result = jvm->AttachCurrentThread(&env, &args);
+  assert(attach_result == 0);
+
+  jclass clazz = env->FindClass("JniTest");
+  assert(clazz != NULL);
+  assert(!env->ExceptionCheck());
+
+  jfieldID field = env->GetStaticFieldID(clazz, "testFindFieldOnAttachedNativeThreadField", "Z");
+  assert(field != NULL);
+  assert(!env->ExceptionCheck());
+
+  env->SetStaticBooleanField(clazz, field, JNI_TRUE);
+
+  int detach_result = jvm->DetachCurrentThread();
+  assert(detach_result == 0);
+  return NULL;
+}
+
+extern "C" JNIEXPORT void JNICALL Java_JniTest_testFindFieldOnAttachedNativeThreadNative(JNIEnv*,
+                                                                                         jclass) {
+  pthread_t pthread;
+  int pthread_create_result = pthread_create(&pthread,
+                                             NULL,
+                                             testFindFieldOnAttachedNativeThread,
+                                             NULL);
+  assert(pthread_create_result == 0);
+  int pthread_join_result = pthread_join(pthread, NULL);
+  assert(pthread_join_result == 0);
+}
+
+
 // http://b/11243757
 extern "C" JNIEXPORT void JNICALL Java_JniTest_testCallStaticVoidMethodOnSubClassNative(JNIEnv* env,
                                                                                         jclass) {
@@ -80,4 +117,23 @@ extern "C" JNIEXPORT void JNICALL Java_JniTest_testCallStaticVoidMethodOnSubClas
   assert(sub_class != NULL);
 
   env->CallStaticVoidMethod(sub_class, execute);
+}
+
+extern "C" JNIEXPORT jobject JNICALL Java_JniTest_testGetMirandaMethodNative(JNIEnv* env, jclass) {
+  jclass abstract_class = env->FindClass("JniTest$testGetMirandaMethod_MirandaAbstract");
+  assert(abstract_class != NULL);
+  jmethodID miranda_method = env->GetMethodID(abstract_class, "inInterface", "()Z");
+  assert(miranda_method != NULL);
+  return env->ToReflectedMethod(abstract_class, miranda_method, JNI_FALSE);
+}
+
+// https://code.google.com/p/android/issues/detail?id=63055
+extern "C" void JNICALL Java_JniTest_testZeroLengthByteBuffers(JNIEnv* env, jclass) {
+  std::vector<uint8_t> buffer(1);
+  jobject byte_buffer = env->NewDirectByteBuffer(&buffer[0], 0);
+  assert(byte_buffer != NULL);
+  assert(!env->ExceptionCheck());
+
+  assert(env->GetDirectBufferAddress(byte_buffer) == &buffer[0]);
+  assert(env->GetDirectBufferCapacity(byte_buffer) == 0);
 }

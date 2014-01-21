@@ -27,6 +27,7 @@
 
 #include "base/macros.h"
 #include "base/stringpiece.h"
+#include "gc/collector_type.h"
 #include "gc/heap.h"
 #include "globals.h"
 #include "instruction_set.h"
@@ -45,12 +46,17 @@ namespace gc {
 namespace mirror {
   class ArtMethod;
   class ClassLoader;
+  template<class T> class ObjectArray;
   template<class T> class PrimitiveArray;
   typedef PrimitiveArray<int8_t> ByteArray;
   class String;
   class Throwable;
 }  // namespace mirror
+namespace verifier {
+class MethodVerifier;
+}
 class ClassLinker;
+class CompilerCallbacks;
 class DexFile;
 class InternTable;
 struct JavaVMExt;
@@ -95,13 +101,16 @@ class Runtime {
     std::string image_;
     bool check_jni_;
     std::string jni_trace_;
-    bool is_compiler_;
+    CompilerCallbacks* compiler_callbacks_;
     bool is_zygote_;
     bool interpreter_only_;
-    bool is_concurrent_gc_enabled_;
     bool is_explicit_gc_disabled_;
+    bool use_tlab_;
+    bool verify_pre_gc_heap_;
+    bool verify_post_gc_heap_;
     size_t long_pause_log_threshold_;
     size_t long_gc_log_threshold_;
+    bool dump_gc_performance_on_shutdown_;
     bool ignore_max_footprint_;
     size_t heap_initial_size_;
     size_t heap_maximum_size_;
@@ -111,7 +120,10 @@ class Runtime {
     double heap_target_utilization_;
     size_t parallel_gc_threads_;
     size_t conc_gc_threads_;
+    gc::CollectorType collector_type_;
+    gc::CollectorType background_collector_type_;
     size_t stack_size_;
+    size_t max_spins_before_thin_lock_inflation_;
     bool low_memory_mode_;
     size_t lock_profiling_threshold_;
     std::string stack_trace_file_;
@@ -130,6 +142,12 @@ class Runtime {
     size_t tiny_method_threshold_;
     size_t num_dex_methods_threshold_;
     bool sea_ir_mode_;
+    bool profile_;
+    std::string profile_output_filename_;
+    int profile_period_s_;
+    int profile_duration_s_;
+    int profile_interval_us_;
+    double profile_backoff_coefficient_;
 
    private:
     ParsedOptions() {}
@@ -140,15 +158,15 @@ class Runtime {
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
 
   bool IsCompiler() const {
-    return is_compiler_;
+    return compiler_callbacks_ != nullptr;
+  }
+
+  CompilerCallbacks* GetCompilerCallbacks() {
+    return compiler_callbacks_;
   }
 
   bool IsZygote() const {
     return is_zygote_;
-  }
-
-  bool IsConcurrentGcEnabled() const {
-    return is_concurrent_gc_enabled_;
   }
 
   bool IsExplicitGcDisabled() const {
@@ -201,7 +219,8 @@ class Runtime {
   // Starts a runtime, which may cause threads to be started and code to run.
   bool Start() UNLOCK_FUNCTION(Locks::mutator_lock_);
 
-  bool IsShuttingDown() const EXCLUSIVE_LOCKS_REQUIRED(Locks::runtime_shutdown_lock_) {
+  bool IsShuttingDown(Thread* self);
+  bool IsShuttingDownLocked() const EXCLUSIVE_LOCKS_REQUIRED(Locks::runtime_shutdown_lock_) {
     return shutting_down_;
   }
 
@@ -279,11 +298,16 @@ class Runtime {
   }
 
   InternTable* GetInternTable() const {
+    DCHECK(intern_table_ != NULL);
     return intern_table_;
   }
 
   JavaVMExt* GetJavaVM() const {
     return java_vm_;
+  }
+
+  size_t GetMaxSpinsBeforeThinkLockInflation() const {
+    return max_spins_before_thin_lock_inflation_;
   }
 
   MonitorList* GetMonitorList() const {
@@ -314,14 +338,21 @@ class Runtime {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Visit all of the roots we can do safely do concurrently.
-  void VisitConcurrentRoots(RootVisitor* visitor, void* arg, bool only_dirty, bool clean_dirty);
+  void VisitConcurrentRoots(RootVisitor* visitor, void* arg, bool only_dirty, bool clean_dirty)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Visit all of the non thread roots, we can do this with mutators unpaused.
-  void VisitNonThreadRoots(RootVisitor* visitor, void* arg);
+  void VisitNonThreadRoots(RootVisitor* visitor, void* arg)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Visit all other roots which must be done with mutators suspended.
   void VisitNonConcurrentRoots(RootVisitor* visitor, void* arg)
-    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // Sweep system weaks, the system weak is deleted if the visitor return nullptr. Otherwise, the
+  // system weak is updated to be the visitor's returned value.
+  void SweepSystemWeaks(RootVisitor* visitor, void* arg)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Returns a special method that calls into a trampoline for runtime method resolution
   mirror::ArtMethod* GetResolutionMethod() const {
@@ -338,6 +369,39 @@ class Runtime {
   }
 
   mirror::ArtMethod* CreateResolutionMethod() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // Returns a special method that calls into a trampoline for runtime imt conflicts
+  mirror::ArtMethod* GetImtConflictMethod() const {
+    CHECK(HasImtConflictMethod());
+    return imt_conflict_method_;
+  }
+
+  bool HasImtConflictMethod() const {
+    return imt_conflict_method_ != NULL;
+  }
+
+  void SetImtConflictMethod(mirror::ArtMethod* method) {
+    imt_conflict_method_ = method;
+  }
+
+  mirror::ArtMethod* CreateImtConflictMethod() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // Returns an imt with every entry set to conflict, used as default imt for all classes.
+  mirror::ObjectArray<mirror::ArtMethod>* GetDefaultImt() const {
+    CHECK(HasDefaultImt());
+    return default_imt_;
+  }
+
+  bool HasDefaultImt() const {
+    return default_imt_ != NULL;
+  }
+
+  void SetDefaultImt(mirror::ObjectArray<mirror::ArtMethod>* imt) {
+    default_imt_ = imt;
+  }
+
+  mirror::ObjectArray<mirror::ArtMethod>* CreateDefaultImt(ClassLinker* cl)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Returns a special method that describes all callee saves being spilled to the stack.
   enum CalleeSaveType {
@@ -394,8 +458,14 @@ class Runtime {
     return use_compile_time_class_path_;
   }
 
+  void AddMethodVerifier(verifier::MethodVerifier* verifier) LOCKS_EXCLUDED(method_verifier_lock_);
+  void RemoveMethodVerifier(verifier::MethodVerifier* verifier)
+      LOCKS_EXCLUDED(method_verifier_lock_);
+
   const std::vector<const DexFile*>& GetCompileTimeClassPath(jobject class_loader);
   void SetCompileTimeClassPath(jobject class_loader, std::vector<const DexFile*>& class_path);
+
+  void StartProfiler(const char *appDir, bool startImmediately = false);
 
  private:
   static void InitPlatformSignalHandlers();
@@ -416,7 +486,7 @@ class Runtime {
   // A pointer to the active runtime or NULL.
   static Runtime* instance_;
 
-  bool is_compiler_;
+  CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
   bool is_concurrent_gc_enabled_;
   bool is_explicit_gc_disabled_;
@@ -451,6 +521,8 @@ class Runtime {
 
   gc::Heap* heap_;
 
+  // The number of spins that are done before thread suspension is used to forcibly inflate.
+  size_t max_spins_before_thin_lock_inflation_;
   MonitorList* monitor_list_;
 
   ThreadList* thread_list_;
@@ -469,6 +541,14 @@ class Runtime {
   mirror::ArtMethod* callee_save_methods_[kLastCalleeSaveType];
 
   mirror::ArtMethod* resolution_method_;
+
+  mirror::ArtMethod* imt_conflict_method_;
+
+  mirror::ObjectArray<mirror::ArtMethod>* default_imt_;
+
+  // Method verifier set, used so that we can update their GC roots.
+  Mutex method_verifiers_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  std::set<verifier::MethodVerifier*> method_verifiers_;
 
   // A non-zero value indicates that a thread has been created but not yet initialized. Guarded by
   // the shutdown lock so that threads aren't born while we're shutting down.
@@ -498,6 +578,14 @@ class Runtime {
   bool stats_enabled_;
   RuntimeStats stats_;
 
+  // Runtime profile support.
+  bool profile_;
+  std::string profile_output_filename_;
+  uint32_t profile_period_s_;                  // Generate profile every n seconds.
+  uint32_t profile_duration_s_;                // Run profile for n seconds.
+  uint32_t profile_interval_us_;                // Microseconds between samples.
+  double profile_backoff_coefficient_;  // Coefficient to exponential backoff.
+
   bool method_trace_;
   std::string method_trace_file_;
   size_t method_trace_file_size_;
@@ -512,6 +600,9 @@ class Runtime {
 
   // As returned by ClassLoader.getSystemClassLoader().
   jobject system_class_loader_;
+
+  // If true, then we dump the GC cumulative timings on shutdown.
+  bool dump_gc_performance_on_shutdown_;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

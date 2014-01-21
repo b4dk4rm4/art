@@ -23,6 +23,8 @@
 #include "compiler/oat_writer.h"
 #include "gc/space/image_space.h"
 #include "image.h"
+#include "lock_word.h"
+#include "mirror/object-inl.h"
 #include "signal_catcher.h"
 #include "UniquePtr.h"
 #include "utils.h"
@@ -44,7 +46,7 @@ TEST_F(ImageTest, WriteRead) {
     {
       jobject class_loader = NULL;
       ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-      base::TimingLogger timings("ImageTest::WriteRead", false, false);
+      TimingLogger timings("ImageTest::WriteRead", false, false);
       timings.StartSplit("CompileAll");
 #if defined(ART_USE_PORTABLE_COMPILER)
       // TODO: we disable this for portable so the test executes in a reasonable amount of time.
@@ -58,13 +60,14 @@ TEST_F(ImageTest, WriteRead) {
 
       ScopedObjectAccess soa(Thread::Current());
       OatWriter oat_writer(class_linker->GetBootClassPath(),
-                           0, 0, "", compiler_driver_.get());
+                           0, 0, "", compiler_driver_.get(), &timings);
       bool success = compiler_driver_->WriteElf(GetTestAndroidRoot(),
                                                 !kIsTargetBuild,
                                                 class_linker->GetBootClassPath(),
                                                 oat_writer,
                                                 tmp_elf.GetFile());
       ASSERT_TRUE(success);
+      timings.EndSplit();
     }
   }
   // Workound bug that mcld::Linker::emit closes tmp_elf by reopening as tmp_oat.
@@ -92,11 +95,11 @@ TEST_F(ImageTest, WriteRead) {
     ASSERT_NE(0U, image_header.GetImageBitmapSize());
 
     gc::Heap* heap = Runtime::Current()->GetHeap();
-    ASSERT_EQ(1U, heap->GetContinuousSpaces().size());
-    gc::space::ContinuousSpace* space = heap->GetContinuousSpaces().front();
+    ASSERT_TRUE(!heap->GetContinuousSpaces().empty());
+    gc::space::ContinuousSpace* space = heap->GetNonMovingSpace();
     ASSERT_FALSE(space->IsImageSpace());
     ASSERT_TRUE(space != NULL);
-    ASSERT_TRUE(space->IsDlMallocSpace());
+    ASSERT_TRUE(space->IsMallocSpace());
     ASSERT_GE(sizeof(image_header) + space->Size(), static_cast<size_t>(file->GetLength()));
   }
 
@@ -110,8 +113,11 @@ TEST_F(ImageTest, WriteRead) {
   runtime_.reset();
   java_lang_dex_file_ = NULL;
 
-  UniquePtr<const DexFile> dex(DexFile::Open(GetLibCoreDexFileName(), GetLibCoreDexFileName()));
-  ASSERT_TRUE(dex.get() != NULL);
+  std::string error_msg;
+  UniquePtr<const DexFile> dex(DexFile::Open(GetLibCoreDexFileName().c_str(),
+                                             GetLibCoreDexFileName().c_str(),
+                                             &error_msg));
+  ASSERT_TRUE(dex.get() != nullptr) << error_msg;
 
   // Remove the reservation of the memory for use to load the image.
   UnreserveImageSpace();
@@ -134,11 +140,8 @@ TEST_F(ImageTest, WriteRead) {
   class_linker_ = runtime_->GetClassLinker();
 
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  ASSERT_EQ(2U, heap->GetContinuousSpaces().size());
-  ASSERT_TRUE(heap->GetContinuousSpaces()[0]->IsImageSpace());
-  ASSERT_FALSE(heap->GetContinuousSpaces()[0]->IsDlMallocSpace());
-  ASSERT_FALSE(heap->GetContinuousSpaces()[1]->IsImageSpace());
-  ASSERT_TRUE(heap->GetContinuousSpaces()[1]->IsDlMallocSpace());
+  ASSERT_TRUE(heap->HasImageSpace());
+  ASSERT_TRUE(heap->GetNonMovingSpace()->IsMallocSpace());
 
   gc::space::ImageSpace* image_space = heap->GetImageSpace();
   image_space->VerifyImageAllocations();
@@ -149,16 +152,16 @@ TEST_F(ImageTest, WriteRead) {
     const DexFile::ClassDef& class_def = dex->GetClassDef(i);
     const char* descriptor = dex->GetClassDescriptor(class_def);
     mirror::Class* klass = class_linker_->FindSystemClass(descriptor);
-    EXPECT_TRUE(klass != NULL) << descriptor;
-    EXPECT_LT(image_begin, reinterpret_cast<byte*>(klass)) << descriptor;
+    EXPECT_TRUE(klass != nullptr) << descriptor;
     if (image_classes.find(descriptor) != image_classes.end()) {
-      // image classes should be located before the end of the image.
+      // Image classes should be located inside the image.
+      EXPECT_LT(image_begin, reinterpret_cast<byte*>(klass)) << descriptor;
       EXPECT_LT(reinterpret_cast<byte*>(klass), image_end) << descriptor;
     } else {
-      // non image classes should be in a space after the image.
-      EXPECT_GT(reinterpret_cast<byte*>(klass), image_end) << descriptor;
+      EXPECT_TRUE(reinterpret_cast<byte*>(klass) >= image_end ||
+                  reinterpret_cast<byte*>(klass) < image_begin) << descriptor;
     }
-    EXPECT_TRUE(Monitor::IsValidLockWord(*klass->GetRawLockWordAddress()));
+    EXPECT_TRUE(Monitor::IsValidLockWord(klass->GetLockWord()));
   }
 }
 

@@ -37,11 +37,13 @@ class ExceptionTest : public CommonTest {
     CommonTest::SetUp();
 
     ScopedObjectAccess soa(Thread::Current());
-    SirtRef<mirror::ClassLoader> class_loader(soa.Self(),
-                                      soa.Decode<mirror::ClassLoader*>(LoadDex("ExceptionHandle")));
-    my_klass_ = class_linker_->FindClass("LExceptionHandle;", class_loader.get());
+    SirtRef<mirror::ClassLoader> class_loader(
+        soa.Self(), soa.Decode<mirror::ClassLoader*>(LoadDex("ExceptionHandle")));
+    my_klass_ = class_linker_->FindClass("LExceptionHandle;", class_loader);
     ASSERT_TRUE(my_klass_ != NULL);
-    class_linker_->EnsureInitialized(my_klass_, true, true);
+    SirtRef<mirror::Class> sirt_klass(soa.Self(), my_klass_);
+    class_linker_->EnsureInitialized(sirt_klass, true, true);
+    my_klass_ = sirt_klass.get();
 
     dex_ = my_klass_->GetDexCache()->GetDexFile();
 
@@ -54,17 +56,17 @@ class ExceptionTest : public CommonTest {
       fake_code_.push_back(0x70 | i);
     }
 
-    fake_mapping_data_.PushBack(4);  // first element is count
-    fake_mapping_data_.PushBack(4);  // total (non-length) elements
-    fake_mapping_data_.PushBack(2);  // count of pc to dex elements
+    fake_mapping_data_.PushBackUnsigned(4);  // first element is count
+    fake_mapping_data_.PushBackUnsigned(4);  // total (non-length) elements
+    fake_mapping_data_.PushBackUnsigned(2);  // count of pc to dex elements
                                       // ---  pc to dex table
-    fake_mapping_data_.PushBack(3);  // offset 3
-    fake_mapping_data_.PushBack(3);  // maps to dex offset 3
+    fake_mapping_data_.PushBackUnsigned(3 - 0);  // offset 3
+    fake_mapping_data_.PushBackSigned(3 - 0);    // maps to dex offset 3
                                       // ---  dex to pc table
-    fake_mapping_data_.PushBack(3);  // offset 3
-    fake_mapping_data_.PushBack(3);  // maps to dex offset 3
+    fake_mapping_data_.PushBackUnsigned(3 - 0);  // offset 3
+    fake_mapping_data_.PushBackSigned(3 - 0);    // maps to dex offset 3
 
-    fake_vmap_table_data_.PushBack(0);
+    fake_vmap_table_data_.PushBackUnsigned(0);
 
     fake_gc_map_.push_back(0);  // 0 bytes to encode references and native pc offsets.
     fake_gc_map_.push_back(0);
@@ -91,8 +93,8 @@ class ExceptionTest : public CommonTest {
   const DexFile* dex_;
 
   std::vector<uint8_t> fake_code_;
-  UnsignedLeb128EncodingVector fake_mapping_data_;
-  UnsignedLeb128EncodingVector fake_vmap_table_data_;
+  Leb128EncodingVector fake_mapping_data_;
+  Leb128EncodingVector fake_vmap_table_data_;
   std::vector<uint8_t> fake_gc_map_;
 
   mirror::ArtMethod* method_f_;
@@ -146,7 +148,7 @@ TEST_F(ExceptionTest, StackTraceElement) {
   ScopedObjectAccess soa(env);
 
   std::vector<uintptr_t> fake_stack;
-  ASSERT_EQ(kStackAlignment, 16);
+  ASSERT_EQ(kStackAlignment, 16U);
   ASSERT_EQ(sizeof(uintptr_t), sizeof(uint32_t));
 
 #if !defined(ART_USE_PORTABLE_COMPILER)

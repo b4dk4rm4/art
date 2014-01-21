@@ -21,14 +21,18 @@
 #include "dataflow_iterator-inl.h"
 #include "leb128.h"
 #include "mirror/object.h"
+#include "pass_driver.h"
 #include "runtime.h"
 #include "backend.h"
 #include "base/logging.h"
+#include "base/timing_logger.h"
 
 #if defined(ART_USE_PORTABLE_COMPILER)
 #include "dex/portable/mir_to_gbc.h"
 #include "llvm/llvm_compilation_unit.h"
 #endif
+
+#include "dex/quick/dex_file_to_method_inliner_map.h"
 
 namespace {
 #if !defined(ART_USE_PORTABLE_COMPILER)
@@ -60,15 +64,12 @@ LLVMInfo::LLVMInfo() {
 LLVMInfo::~LLVMInfo() {
 }
 
-extern "C" void ArtInitQuickCompilerContext(art::CompilerDriver& compiler) {
-  CHECK(compiler.GetCompilerContext() == NULL);
-  LLVMInfo* llvm_info = new LLVMInfo();
-  compiler.SetCompilerContext(llvm_info);
+extern "C" void ArtInitQuickCompilerContext(art::CompilerDriver& driver) {
+  CHECK(driver.GetCompilerContext() == NULL);
 }
 
-extern "C" void ArtUnInitQuickCompilerContext(art::CompilerDriver& compiler) {
-  delete reinterpret_cast<LLVMInfo*>(compiler.GetCompilerContext());
-  compiler.SetCompilerContext(NULL);
+extern "C" void ArtUnInitQuickCompilerContext(art::CompilerDriver& driver) {
+  CHECK(driver.GetCompilerContext() == NULL);
 }
 
 /* Default optimizer/debug setting for the compiler. */
@@ -83,6 +84,7 @@ static uint32_t kCompilerOptimizerDisableFlags = 0 |  // Disable specific optimi
   // (1 << kBBOpt) |
   // (1 << kMatch) |
   // (1 << kPromoteCompilerTemps) |
+  // (1 << kSuppressExceptionEdges) |
   0;
 
 static uint32_t kCompilerDebugFlags = 0 |     // Enable debug/testing modes
@@ -104,7 +106,61 @@ static uint32_t kCompilerDebugFlags = 0 |     // Enable debug/testing modes
   // (1 << kDebugVerifyBitcode) |
   // (1 << kDebugShowSummaryMemoryUsage) |
   // (1 << kDebugShowFilterStats) |
+  // (1 << kDebugTimings) |
   0;
+
+CompilationUnit::CompilationUnit(ArenaPool* pool)
+  : compiler_driver(NULL),
+    class_linker(NULL),
+    dex_file(NULL),
+    class_loader(NULL),
+    class_def_idx(0),
+    method_idx(0),
+    code_item(NULL),
+    access_flags(0),
+    invoke_type(kDirect),
+    shorty(NULL),
+    disable_opt(0),
+    enable_debug(0),
+    verbose(false),
+    compiler_backend(kNoBackend),
+    instruction_set(kNone),
+    num_dalvik_registers(0),
+    insns(NULL),
+    num_ins(0),
+    num_outs(0),
+    num_regs(0),
+    num_compiler_temps(0),
+    compiler_flip_match(false),
+    arena(pool),
+    mir_graph(NULL),
+    cg(NULL),
+    timings("QuickCompiler", true, false) {
+}
+
+CompilationUnit::~CompilationUnit() {
+}
+
+// TODO: Add a cumulative version of logging, and combine with dex2oat --dump-timing
+void CompilationUnit::StartTimingSplit(const char* label) {
+  if (enable_debug & (1 << kDebugTimings)) {
+    timings.StartSplit(label);
+  }
+}
+
+void CompilationUnit::NewTimingSplit(const char* label) {
+  if (enable_debug & (1 << kDebugTimings)) {
+    timings.NewSplit(label);
+  }
+}
+
+void CompilationUnit::EndTiming() {
+  if (enable_debug & (1 << kDebugTimings)) {
+    timings.EndSplit();
+    LOG(INFO) << "TIMINGS " << PrettyMethod(method_idx, *dex_file);
+    LOG(INFO) << Dumpable<TimingLogger>(timings);
+  }
+}
 
 static CompiledMethod* CompileMethod(CompilerDriver& compiler,
                                      const CompilerBackend compiler_backend,
@@ -117,6 +173,11 @@ static CompiledMethod* CompileMethod(CompilerDriver& compiler,
 #endif
 ) {
   VLOG(compiler) << "Compiling " << PrettyMethod(method_idx, dex_file) << "...";
+  if (code_item->insns_size_in_code_units_ >= 0x10000) {
+    LOG(INFO) << "Method size exceeds compiler limits: " << code_item->insns_size_in_code_units_
+              << " in " << PrettyMethod(method_idx, dex_file);
+    return NULL;
+  }
 
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   CompilationUnit cu(&compiler.GetArenaPool());
@@ -151,8 +212,10 @@ static CompiledMethod* CompileMethod(CompilerDriver& compiler,
    */
 
   if (compiler_backend == kPortable) {
-    // Fused long branches not currently usseful in bitcode.
-    cu.disable_opt |= (1 << kBranchFusing);
+    // Fused long branches not currently useful in bitcode.
+    cu.disable_opt |=
+        (1 << kBranchFusing) |
+        (1 << kSuppressExceptionEdges);
   }
 
   if (cu.instruction_set == kMips) {
@@ -170,6 +233,7 @@ static CompiledMethod* CompileMethod(CompilerDriver& compiler,
         (1 << kPromoteCompilerTemps));
   }
 
+  cu.StartTimingSplit("BuildMIRGraph");
   cu.mir_graph.reset(new MIRGraph(&cu, &cu.arena));
 
   /* Gathering opcode stats? */
@@ -181,32 +245,16 @@ static CompiledMethod* CompileMethod(CompilerDriver& compiler,
   cu.mir_graph->InlineMethod(code_item, access_flags, invoke_type, class_def_idx, method_idx,
                               class_loader, dex_file);
 
+  cu.NewTimingSplit("MIROpt:CheckFilters");
 #if !defined(ART_USE_PORTABLE_COMPILER)
   if (cu.mir_graph->SkipCompilation(Runtime::Current()->GetCompilerFilter())) {
     return NULL;
   }
 #endif
 
-  /* Do a code layout pass */
-  cu.mir_graph->CodeLayout();
-
-  /* Perform SSA transformation for the whole method */
-  cu.mir_graph->SSATransformation();
-
-  /* Do constant propagation */
-  cu.mir_graph->PropagateConstants();
-
-  /* Count uses */
-  cu.mir_graph->MethodUseCount();
-
-  /* Perform null check elimination */
-  cu.mir_graph->NullCheckElimination();
-
-  /* Combine basic blocks where possible */
-  cu.mir_graph->BasicBlockCombine();
-
-  /* Do some basic block optimizations */
-  cu.mir_graph->BasicBlockOptimization();
+  /* Create the pass driver and launch it */
+  PassDriver driver(&cu);
+  driver.Launch();
 
   if (cu.enable_debug & (1 << kDebugDumpCheckStats)) {
     cu.mir_graph->DumpCheckStats();
@@ -216,8 +264,8 @@ static CompiledMethod* CompileMethod(CompilerDriver& compiler,
     cu.mir_graph->ShowOpcodeStats();
   }
 
-  /* Set up regLocation[] array to describe values - one for each ssa_name. */
-  cu.mir_graph->BuildRegLocations();
+  /* Reassociate sreg names with original Dalvik vreg names. */
+  cu.mir_graph->RemapRegLocations();
 
   CompiledMethod* result = NULL;
 
@@ -245,7 +293,9 @@ static CompiledMethod* CompileMethod(CompilerDriver& compiler,
 
   cu.cg->Materialize();
 
+  cu.NewTimingSplit("Dedupe");  /* deduping takes up the vast majority of time in GetCompiledMethod(). */
   result = cu.cg->GetCompiledMethod();
+  cu.NewTimingSplit("Cleanup");
 
   if (result) {
     VLOG(compiler) << "Compiled " << PrettyMethod(method_idx, dex_file);
@@ -265,6 +315,7 @@ static CompiledMethod* CompileMethod(CompilerDriver& compiler,
               << " " << PrettyMethod(method_idx, dex_file);
   }
 
+  cu.EndTiming();
   return result;
 }
 

@@ -40,6 +40,13 @@ extern "C" void art_quick_invoke_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, 
 // TODO: get global references for these
 Class* ArtMethod::java_lang_reflect_ArtMethod_ = NULL;
 
+void ArtMethod::VisitRoots(RootVisitor* visitor, void* arg) {
+  if (java_lang_reflect_ArtMethod_ != nullptr) {
+    java_lang_reflect_ArtMethod_ = down_cast<mirror::Class*>(
+        visitor(java_lang_reflect_ArtMethod_, arg));
+  }
+}
+
 InvokeType ArtMethod::GetInvokeType() const {
   // TODO: kSuper?
   if (GetDeclaringClass()->IsInterface()) {
@@ -77,11 +84,6 @@ void ArtMethod::SetDexCacheResolvedMethods(ObjectArray<ArtMethod>* new_dex_cache
 void ArtMethod::SetDexCacheResolvedTypes(ObjectArray<Class>* new_dex_cache_classes) {
   SetFieldObject(OFFSET_OF_OBJECT_MEMBER(ArtMethod, dex_cache_resolved_types_),
                  new_dex_cache_classes, false);
-}
-
-void ArtMethod::SetDexCacheInitializedStaticStorage(ObjectArray<StaticStorageBase>* new_value) {
-  SetFieldObject(OFFSET_OF_OBJECT_MEMBER(ArtMethod, dex_cache_initialized_static_storage_),
-      new_value, false);
 }
 
 size_t ArtMethod::NumArgRegisters(const StringPiece& shorty) {
@@ -306,11 +308,15 @@ bool ArtMethod::IsRegistered() const {
 }
 
 extern "C" void art_work_around_app_jni_bugs(JNIEnv*, jobject);
-void ArtMethod::RegisterNative(Thread* self, const void* native_method) {
+void ArtMethod::RegisterNative(Thread* self, const void* native_method, bool is_fast) {
   DCHECK(Thread::Current() == self);
   CHECK(IsNative()) << PrettyMethod(this);
+  CHECK(!IsFastNative()) << PrettyMethod(this);
   CHECK(native_method != NULL) << PrettyMethod(this);
   if (!self->GetJniEnv()->vm->work_around_app_jni_bugs) {
+    if (is_fast) {
+      SetAccessFlags(GetAccessFlags() | kAccFastNative);
+    }
     SetNativeMethod(native_method);
   } else {
     // We've been asked to associate this method with the given native method but are working
@@ -328,9 +334,9 @@ void ArtMethod::RegisterNative(Thread* self, const void* native_method) {
 }
 
 void ArtMethod::UnregisterNative(Thread* self) {
-  CHECK(IsNative()) << PrettyMethod(this);
+  CHECK(IsNative() && !IsFastNative()) << PrettyMethod(this);
   // restore stub to lookup native pointer via dlsym
-  RegisterNative(self, GetJniDlsymLookupStub());
+  RegisterNative(self, GetJniDlsymLookupStub(), false);
 }
 
 void ArtMethod::SetNativeMethod(const void* native_method) {

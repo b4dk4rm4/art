@@ -20,12 +20,14 @@
 #include "base/stl_util.h"
 #include "class_linker.h"
 #include "compiled_method.h"
+#include "dex/verified_methods_data.h"
 #include "driver/compiler_driver.h"
 #include "driver/dex_compilation_unit.h"
 #include "globals.h"
 #include "ir_builder.h"
 #include "jni/portable/jni_compiler.h"
 #include "llvm_compilation_unit.h"
+#include "thread-inl.h"
 #include "utils_llvm.h"
 #include "verifier/method_verifier.h"
 
@@ -154,7 +156,8 @@ CompileDexMethod(DexCompilationUnit* dex_compilation_unit, InvokeType invoke_typ
   MethodReference mref(dex_compilation_unit->GetDexFile(),
                        dex_compilation_unit->GetDexMethodIndex());
   return new CompiledMethod(*compiler_driver_, compiler_driver_->GetInstructionSet(),
-                            cunit->GetElfObject(), *verifier::MethodVerifier::GetDexGcMap(mref),
+                            cunit->GetElfObject(),
+                            *compiler_driver_->GetVerifiedMethodsData()->GetDexGcMap(mref),
                             cunit->GetDexCompilationUnit()->GetSymbol());
 }
 
@@ -164,7 +167,7 @@ CompileNativeMethod(DexCompilationUnit* dex_compilation_unit) {
   UniquePtr<LlvmCompilationUnit> cunit(AllocateCompilationUnit());
 
   UniquePtr<JniCompiler> jni_compiler(
-      new JniCompiler(cunit.get(), *compiler_driver_, dex_compilation_unit));
+      new JniCompiler(cunit.get(), compiler_driver_, dex_compilation_unit));
 
   return jni_compiler->Compile();
 }

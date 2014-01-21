@@ -21,13 +21,13 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "object_utils.h"
-#include "scoped_thread_state_change.h"
+#include "scoped_fast_native_object_access.h"
 #include "sirt_ref.h"
 
 namespace art {
 
 static jobject Array_createMultiArray(JNIEnv* env, jclass, jclass javaElementClass, jobject javaDimArray) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   DCHECK(javaElementClass != NULL);
   mirror::Class* element_class = soa.Decode<mirror::Class*>(javaElementClass);
   DCHECK(element_class->IsClass());
@@ -41,7 +41,7 @@ static jobject Array_createMultiArray(JNIEnv* env, jclass, jclass javaElementCla
 }
 
 static jobject Array_createObjectArray(JNIEnv* env, jclass, jclass javaElementClass, jint length) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   DCHECK(javaElementClass != NULL);
   mirror::Class* element_class = soa.Decode<mirror::Class*>(javaElementClass);
   if (UNLIKELY(length < 0)) {
@@ -52,19 +52,20 @@ static jobject Array_createObjectArray(JNIEnv* env, jclass, jclass javaElementCl
   descriptor += ClassHelper(element_class).GetDescriptor();
 
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  mirror::Class* array_class = class_linker->FindClass(descriptor.c_str(), element_class->GetClassLoader());
+  SirtRef<mirror::ClassLoader> class_loader(soa.Self(), element_class->GetClassLoader());
+  mirror::Class* array_class = class_linker->FindClass(descriptor.c_str(), class_loader);
   if (UNLIKELY(array_class == NULL)) {
     CHECK(soa.Self()->IsExceptionPending());
     return NULL;
   }
   DCHECK(array_class->IsArrayClass());
-  mirror::Array* new_array = mirror::Array::Alloc(soa.Self(), array_class, length);
+  mirror::Array* new_array = mirror::Array::Alloc<true>(soa.Self(), array_class, length);
   return soa.AddLocalReference<jobject>(new_array);
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Array, createMultiArray, "(Ljava/lang/Class;[I)Ljava/lang/Object;"),
-  NATIVE_METHOD(Array, createObjectArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
+  NATIVE_METHOD(Array, createMultiArray, "!(Ljava/lang/Class;[I)Ljava/lang/Object;"),
+  NATIVE_METHOD(Array, createObjectArray, "!(Ljava/lang/Class;I)Ljava/lang/Object;"),
 };
 
 void register_java_lang_reflect_Array(JNIEnv* env) {

@@ -73,7 +73,7 @@ class JavaVMExt : public JavaVM {
    * human-readable description of the error.
    */
   bool LoadNativeLibrary(const std::string& path, mirror::ClassLoader* class_loader,
-                         std::string& detail)
+                         std::string* detail)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   /**
@@ -98,7 +98,7 @@ class JavaVMExt : public JavaVM {
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
   void DeleteWeakGlobalRef(Thread* self, jweak obj)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void SweepWeakGlobals(IsMarkedTester is_marked, void* arg);
+  void SweepJniWeakGlobals(RootVisitor visitor, void* arg);
   mirror::Object* DecodeWeakGlobal(Thread* self, IndirectRef ref);
 
   Runtime* runtime;
@@ -161,6 +161,9 @@ struct JNIEnvExt : public JNIEnv {
   static Offset SelfOffset() {
     return Offset(OFFSETOF_MEMBER(JNIEnvExt, self));
   }
+
+  jobject NewLocalRef(mirror::Object* obj) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void DeleteLocalRef(jobject obj) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   Thread* const self;
   JavaVMExt* vm;

@@ -28,14 +28,16 @@ namespace accounting {
 // A mod-union table to record image references to the Zygote and alloc space.
 class ModUnionTableToZygoteAllocspace : public ModUnionTableReferenceCache {
  public:
-  explicit ModUnionTableToZygoteAllocspace(Heap* heap) : ModUnionTableReferenceCache(heap) {}
+  explicit ModUnionTableToZygoteAllocspace(const std::string& name, Heap* heap,
+                                           space::ContinuousSpace* space)
+      : ModUnionTableReferenceCache(name, heap, space) {}
 
-  bool AddReference(const mirror::Object* /* obj */, const mirror::Object* ref) {
+  bool AddReference(const mirror::Object* /* obj */, const mirror::Object* ref) ALWAYS_INLINE {
     const std::vector<space::ContinuousSpace*>& spaces = GetHeap()->GetContinuousSpaces();
     typedef std::vector<space::ContinuousSpace*>::const_iterator It;
     for (It it = spaces.begin(); it != spaces.end(); ++it) {
       if ((*it)->Contains(ref)) {
-        return (*it)->IsDlMallocSpace();
+        return (*it)->IsMallocSpace();
       }
     }
     // Assume it points to a large object.
@@ -47,16 +49,18 @@ class ModUnionTableToZygoteAllocspace : public ModUnionTableReferenceCache {
 // A mod-union table to record Zygote references to the alloc space.
 class ModUnionTableToAllocspace : public ModUnionTableReferenceCache {
  public:
-  explicit ModUnionTableToAllocspace(Heap* heap) : ModUnionTableReferenceCache(heap) {}
+  explicit ModUnionTableToAllocspace(const std::string& name, Heap* heap,
+                                     space::ContinuousSpace* space)
+      : ModUnionTableReferenceCache(name, heap, space) {}
 
-  bool AddReference(const mirror::Object* /* obj */, const mirror::Object* ref) {
+  bool AddReference(const mirror::Object* /* obj */, const mirror::Object* ref) ALWAYS_INLINE {
     const std::vector<space::ContinuousSpace*>& spaces = GetHeap()->GetContinuousSpaces();
     typedef std::vector<space::ContinuousSpace*>::const_iterator It;
     for (It it = spaces.begin(); it != spaces.end(); ++it) {
       space::ContinuousSpace* space = *it;
       if (space->Contains(ref)) {
         // The allocation space is always considered for collection whereas the Zygote space is
-        //
+        // only considered for full GC.
         return space->GetGcRetentionPolicy() == space::kGcRetentionPolicyAlwaysCollect;
       }
     }

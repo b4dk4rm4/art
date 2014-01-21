@@ -56,6 +56,7 @@ enum opt_control_vector {
   kMatch,
   kPromoteCompilerTemps,
   kBranchFusing,
+  kSuppressExceptionEdges,
 };
 
 // Force code generation paths for testing.
@@ -78,7 +79,11 @@ enum debugControlVector {
   kDebugVerifyBitcode,
   kDebugShowSummaryMemoryUsage,
   kDebugShowFilterStats,
+  kDebugTimings
 };
+
+class DexFileToMethodInlinerMap;
+class CompilerDriver;
 
 class LLVMInfo {
   public:

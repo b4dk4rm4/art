@@ -20,6 +20,7 @@
 #include "class_linker.h"
 #include "common_throws.h"
 #include "debugger.h"
+#include "gc/space/bump_pointer_space.h"
 #include "gc/space/dlmalloc_space.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
@@ -65,7 +66,8 @@ static void VMDebug_startMethodTracingDdmsImpl(JNIEnv*, jclass, jint bufferSize,
 }
 
 static void VMDebug_startMethodTracingFd(JNIEnv* env, jclass, jstring javaTraceFilename,
-                                         jobject javaFd, jint bufferSize, jint flags) {
+                                         jobject javaFd, jint bufferSize, jint flags,
+                                         jboolean samplingEnabled, jint intervalUs) {
   int originalFd = jniGetFDFromFileDescriptor(env, javaFd);
   if (originalFd < 0) {
     return;
@@ -84,16 +86,17 @@ static void VMDebug_startMethodTracingFd(JNIEnv* env, jclass, jstring javaTraceF
   if (traceFilename.c_str() == NULL) {
     return;
   }
-  Trace::Start(traceFilename.c_str(), fd, bufferSize, flags, false, false, 0);
+  Trace::Start(traceFilename.c_str(), fd, bufferSize, flags, false, samplingEnabled, intervalUs);
 }
 
 static void VMDebug_startMethodTracingFilename(JNIEnv* env, jclass, jstring javaTraceFilename,
-                                               jint bufferSize, jint flags) {
+                                               jint bufferSize, jint flags,
+                                               jboolean samplingEnabled, jint intervalUs) {
   ScopedUtfChars traceFilename(env, javaTraceFilename);
   if (traceFilename.c_str() == NULL) {
     return;
   }
-  Trace::Start(traceFilename.c_str(), -1, bufferSize, flags, false, false, 0);
+  Trace::Start(traceFilename.c_str(), -1, bufferSize, flags, false, samplingEnabled, intervalUs);
 }
 
 static jint VMDebug_getMethodTracingMode(JNIEnv*, jclass) {
@@ -247,7 +250,7 @@ static jlong VMDebug_countInstancesOfClass(JNIEnv* env, jclass, jclass javaClass
 // /proc/<pid>/smaps.
 static void VMDebug_getHeapSpaceStats(JNIEnv* env, jclass, jlongArray data) {
   jlong* arr = reinterpret_cast<jlong*>(env->GetPrimitiveArrayCritical(data, 0));
-  if (arr == NULL || env->GetArrayLength(data) < 9) {
+  if (arr == nullptr || env->GetArrayLength(data) < 9) {
     return;
   }
 
@@ -257,29 +260,27 @@ static void VMDebug_getHeapSpaceStats(JNIEnv* env, jclass, jlongArray data) {
   size_t zygoteUsed = 0;
   size_t largeObjectsSize = 0;
   size_t largeObjectsUsed = 0;
-
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  const std::vector<gc::space::ContinuousSpace*>& continuous_spaces = heap->GetContinuousSpaces();
-  const std::vector<gc::space::DiscontinuousSpace*>& discontinuous_spaces = heap->GetDiscontinuousSpaces();
-  typedef std::vector<gc::space::ContinuousSpace*>::const_iterator It;
-  for (It it = continuous_spaces.begin(), end = continuous_spaces.end(); it != end; ++it) {
-    gc::space::ContinuousSpace* space = *it;
+  for (gc::space::ContinuousSpace* space : heap->GetContinuousSpaces()) {
     if (space->IsImageSpace()) {
       // Currently don't include the image space.
     } else if (space->IsZygoteSpace()) {
-      gc::space::DlMallocSpace* dlmalloc_space = space->AsDlMallocSpace();
-      zygoteSize += dlmalloc_space->GetFootprint();
-      zygoteUsed += dlmalloc_space->GetBytesAllocated();
-    } else {
-      // This is the alloc space.
-      gc::space::DlMallocSpace* dlmalloc_space = space->AsDlMallocSpace();
-      allocSize += dlmalloc_space->GetFootprint();
-      allocUsed += dlmalloc_space->GetBytesAllocated();
+      gc::space::MallocSpace* malloc_space = space->AsMallocSpace();
+      zygoteSize += malloc_space->GetFootprint();
+      zygoteUsed += malloc_space->GetBytesAllocated();
+    } else if (space->IsMallocSpace()) {
+      // This is a malloc space.
+      gc::space::MallocSpace* malloc_space = space->AsMallocSpace();
+      allocSize += malloc_space->GetFootprint();
+      allocUsed += malloc_space->GetBytesAllocated();
+    } else if (space->IsBumpPointerSpace()) {
+      ScopedObjectAccess soa(env);
+      gc::space::BumpPointerSpace* bump_pointer_space = space->AsBumpPointerSpace();
+      allocSize += bump_pointer_space->Size();
+      allocUsed += bump_pointer_space->GetBytesAllocated();
     }
   }
-  typedef std::vector<gc::space::DiscontinuousSpace*>::const_iterator It2;
-  for (It2 it = discontinuous_spaces.begin(), end = discontinuous_spaces.end(); it != end; ++it) {
-    gc::space::DiscontinuousSpace* space = *it;
+  for (gc::space::DiscontinuousSpace* space : heap->GetDiscontinuousSpaces()) {
     if (space->IsLargeObjectSpace()) {
       largeObjectsSize += space->AsLargeObjectSpace()->GetBytesAllocated();
       largeObjectsUsed += largeObjectsSize;
@@ -326,8 +327,8 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMDebug, startEmulatorTracing, "()V"),
   NATIVE_METHOD(VMDebug, startInstructionCounting, "()V"),
   NATIVE_METHOD(VMDebug, startMethodTracingDdmsImpl, "(IIZI)V"),
-  NATIVE_METHOD(VMDebug, startMethodTracingFd, "(Ljava/lang/String;Ljava/io/FileDescriptor;II)V"),
-  NATIVE_METHOD(VMDebug, startMethodTracingFilename, "(Ljava/lang/String;II)V"),
+  NATIVE_METHOD(VMDebug, startMethodTracingFd, "(Ljava/lang/String;Ljava/io/FileDescriptor;IIZI)V"),
+  NATIVE_METHOD(VMDebug, startMethodTracingFilename, "(Ljava/lang/String;IIZI)V"),
   NATIVE_METHOD(VMDebug, stopAllocCounting, "()V"),
   NATIVE_METHOD(VMDebug, stopEmulatorTracing, "()V"),
   NATIVE_METHOD(VMDebug, stopInstructionCounting, "()V"),

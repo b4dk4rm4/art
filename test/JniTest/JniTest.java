@@ -14,14 +14,30 @@
  * limitations under the License.
  */
 
+import java.lang.reflect.Method;
+
 class JniTest {
     public static void main(String[] args) {
         System.loadLibrary("arttest");
         testFindClassOnAttachedNativeThread();
+        testFindFieldOnAttachedNativeThread();
         testCallStaticVoidMethodOnSubClass();
+        testGetMirandaMethod();
+        testZeroLengthByteBuffers();
     }
 
     private static native void testFindClassOnAttachedNativeThread();
+
+    private static boolean testFindFieldOnAttachedNativeThreadField;
+
+    private static void testFindFieldOnAttachedNativeThread() {
+      testFindFieldOnAttachedNativeThreadNative();
+      if (!testFindFieldOnAttachedNativeThreadField) {
+            throw new AssertionError();
+        }
+    }
+
+    private static native void testFindFieldOnAttachedNativeThreadNative();
 
     private static void testCallStaticVoidMethodOnSubClass() {
         testCallStaticVoidMethodOnSubClassNative();
@@ -41,5 +57,26 @@ class JniTest {
 
     private static class testCallStaticVoidMethodOnSubClass_SubClass
         extends testCallStaticVoidMethodOnSubClass_SuperClass {
+    }
+
+    private static native Method testGetMirandaMethodNative();
+
+    private static void testGetMirandaMethod() {
+        Method m = testGetMirandaMethodNative();
+        if (m.getDeclaringClass() != testGetMirandaMethod_MirandaInterface.class) {
+            throw new AssertionError();
+        }
+    }
+
+    private static native void testZeroLengthByteBuffers();
+
+    private static abstract class testGetMirandaMethod_MirandaAbstract implements testGetMirandaMethod_MirandaInterface {
+        public boolean inAbstract() {
+            return true;
+        }
+    }
+
+    private static interface testGetMirandaMethod_MirandaInterface {
+        public boolean inInterface();
     }
 }

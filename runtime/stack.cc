@@ -22,11 +22,16 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "object_utils.h"
+#include "runtime.h"
 #include "thread_list.h"
 #include "throw_location.h"
 #include "vmap_table.h"
 
 namespace art {
+
+bool ShadowFrame::VerifyReference(const mirror::Object* val) const {
+  return !Runtime::Current()->GetHeap()->IsInTempSpace(val);
+}
 
 mirror::Object* ShadowFrame::GetThisObject() const {
   mirror::ArtMethod* m = GetMethod();
@@ -148,8 +153,8 @@ uint32_t StackVisitor::GetVReg(mirror::ArtMethod* m, uint16_t vreg, VRegKind kin
       const DexFile::CodeItem* code_item = MethodHelper(m).GetCodeItem();
       DCHECK(code_item != NULL) << PrettyMethod(m);  // Can't be NULL or how would we compile its instructions?
       size_t frame_size = m->GetFrameSizeInBytes();
-      return GetVReg(cur_quick_frame_, code_item, m->GetCoreSpillMask(), m->GetFpSpillMask(),
-                     frame_size, vreg);
+      return *GetVRegAddr(cur_quick_frame_, code_item, m->GetCoreSpillMask(), m->GetFpSpillMask(),
+                          frame_size, vreg);
     }
   } else {
     return cur_shadow_frame_->GetVReg(vreg);
@@ -253,7 +258,8 @@ std::string StackVisitor::DescribeLocation() const {
   return result;
 }
 
-instrumentation::InstrumentationStackFrame StackVisitor::GetInstrumentationStackFrame(uint32_t depth) const {
+instrumentation::InstrumentationStackFrame& StackVisitor::GetInstrumentationStackFrame(uint32_t depth) const {
+  CHECK_LT(depth, thread_->GetInstrumentationStack()->size());
   return thread_->GetInstrumentationStack()->at(depth);
 }
 
@@ -309,7 +315,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
           // While profiling, the return pc is restored from the side stack, except when walking
           // the stack for an exception where the side stack will be unwound in VisitFrame.
           if (GetQuickInstrumentationExitPc() == return_pc) {
-            instrumentation::InstrumentationStackFrame instrumentation_frame =
+            const instrumentation::InstrumentationStackFrame& instrumentation_frame =
                 GetInstrumentationStackFrame(instrumentation_stack_depth);
             instrumentation_stack_depth++;
             if (GetMethod() == Runtime::Current()->GetCalleeSaveMethod(Runtime::kSaveAll)) {
@@ -317,10 +323,10 @@ void StackVisitor::WalkStack(bool include_transitions) {
             } else if (instrumentation_frame.interpreter_entry_) {
               mirror::ArtMethod* callee = Runtime::Current()->GetCalleeSaveMethod(Runtime::kRefsAndArgs);
               CHECK_EQ(GetMethod(), callee) << "Expected: " << PrettyMethod(callee) << " Found: "
-                  << PrettyMethod(GetMethod());
+                                            << PrettyMethod(GetMethod());
             } else if (instrumentation_frame.method_ != GetMethod()) {
               LOG(FATAL)  << "Expected: " << PrettyMethod(instrumentation_frame.method_)
-                << " Found: " << PrettyMethod(GetMethod());
+                          << " Found: " << PrettyMethod(GetMethod());
             }
             if (num_frames_ != 0) {
               // Check agreement of frame Ids only if num_frames_ is computed to avoid infinite

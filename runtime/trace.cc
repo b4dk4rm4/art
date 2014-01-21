@@ -299,6 +299,7 @@ void Trace::CompareAndUpdateStackTrace(Thread* thread,
 void* Trace::RunSamplingThread(void* arg) {
   Runtime* runtime = Runtime::Current();
   int interval_us = reinterpret_cast<int>(arg);
+  CHECK_GE(interval_us, 0);
   CHECK(runtime->AttachCurrentThread("Sampling Profiler", true, runtime->GetSystemThreadGroup(),
                                      !runtime->IsCompiler()));
 
@@ -383,6 +384,7 @@ void Trace::Start(const char* trace_filename, int trace_fd, int buffer_size, int
                                                    instrumentation::Instrumentation::kMethodEntered |
                                                    instrumentation::Instrumentation::kMethodExited |
                                                    instrumentation::Instrumentation::kMethodUnwind);
+        runtime->GetInstrumentation()->EnableMethodTracing();
       }
     }
   }
@@ -412,6 +414,7 @@ void Trace::Stop() {
       MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
       runtime->GetThreadList()->ForEach(ClearThreadStackTraceAndClockBase, NULL);
     } else {
+      runtime->GetInstrumentation()->DisableMethodTracing();
       runtime->GetInstrumentation()->RemoveListener(the_trace,
                                                     instrumentation::Instrumentation::kMethodEntered |
                                                     instrumentation::Instrumentation::kMethodExited |
@@ -570,7 +573,8 @@ void Trace::MethodExited(Thread* thread, mirror::Object* this_object,
                       thread_clock_diff, wall_clock_diff);
 }
 
-void Trace::MethodUnwind(Thread* thread, const mirror::ArtMethod* method, uint32_t dex_pc) {
+void Trace::MethodUnwind(Thread* thread, mirror::Object* this_object,
+                         const mirror::ArtMethod* method, uint32_t dex_pc) {
   uint32_t thread_clock_diff = 0;
   uint32_t wall_clock_diff = 0;
   ReadClocks(thread, &thread_clock_diff, &wall_clock_diff);
@@ -667,7 +671,7 @@ void Trace::DumpMethodList(std::ostream& os, const std::set<mirror::ArtMethod*>&
     mh.ChangeMethod(method);
     os << StringPrintf("%p\t%s\t%s\t%s\t%s\n", method,
         PrettyDescriptor(mh.GetDeclaringClassDescriptor()).c_str(), mh.GetName(),
-        mh.GetSignature().c_str(), mh.GetDeclaringClassSourceFile());
+        mh.GetSignature().ToString().c_str(), mh.GetDeclaringClassSourceFile());
   }
 }
 

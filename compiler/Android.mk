@@ -30,6 +30,8 @@ LIBART_COMPILER_SRC_FILES := \
 	dex/quick/arm/target_arm.cc \
 	dex/quick/arm/utility_arm.cc \
 	dex/quick/codegen_util.cc \
+	dex/quick/dex_file_method_inliner.cc \
+	dex/quick/dex_file_to_method_inliner_map.cc \
 	dex/quick/gen_common.cc \
 	dex/quick/gen_invoke.cc \
 	dex/quick/gen_loadstore.cc \
@@ -52,9 +54,12 @@ LIBART_COMPILER_SRC_FILES := \
 	dex/dex_to_dex_compiler.cc \
 	dex/mir_dataflow.cc \
 	dex/mir_optimization.cc \
+	dex/pass_driver.cc \
+	dex/bb_optimizations.cc \
 	dex/frontend.cc \
 	dex/mir_graph.cc \
 	dex/mir_analysis.cc \
+	dex/verified_methods_data.cc \
 	dex/vreg_analysis.cc \
 	dex/ssa_transformation.cc \
 	driver/compiler_driver.cc \
@@ -74,7 +79,6 @@ LIBART_COMPILER_SRC_FILES := \
 	llvm/md_builder.cc \
 	llvm/runtime_support_builder.cc \
 	llvm/runtime_support_builder_arm.cc \
-	llvm/runtime_support_builder_thumb2.cc \
 	llvm/runtime_support_builder_x86.cc \
 	trampolines/trampoline_compiler.cc \
 	utils/arm/assembler_arm.cc \

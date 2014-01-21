@@ -25,12 +25,16 @@
 #include "base/timing_logger.h"
 #include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/card_table.h"
+#include "gc/gc_cause.h"
 #include "gc/collector/gc_type.h"
+#include "gc/collector_type.h"
 #include "globals.h"
 #include "gtest/gtest.h"
 #include "jni.h"
 #include "locks.h"
 #include "offsets.h"
+#include "reference_queue.h"
+#include "root_visitor.h"
 #include "safe_map.h"
 #include "thread_pool.h"
 
@@ -51,22 +55,27 @@ namespace gc {
 namespace accounting {
   class HeapBitmap;
   class ModUnionTable;
-  class SpaceSetMap;
+  class ObjectSet;
 }  // namespace accounting
 
 namespace collector {
   class GarbageCollector;
   class MarkSweep;
+  class SemiSpace;
 }  // namespace collector
 
 namespace space {
   class AllocSpace;
+  class BumpPointerSpace;
   class DiscontinuousSpace;
   class DlMallocSpace;
   class ImageSpace;
   class LargeObjectSpace;
+  class MallocSpace;
+  class RosAllocSpace;
   class Space;
   class SpaceTest;
+  class ContinuousMemMapAllocSpace;
 }  // namespace space
 
 class AgeCardVisitor {
@@ -80,17 +89,15 @@ class AgeCardVisitor {
   }
 };
 
-// What caused the GC?
-enum GcCause {
-  // GC triggered by a failed allocation. Thread doing allocation is blocked waiting for GC before
-  // retrying allocation.
-  kGcCauseForAlloc,
-  // A background GC trying to ensure there is free memory ahead of allocations.
-  kGcCauseBackground,
-  // An explicit System.gc() call.
-  kGcCauseExplicit,
+// Different types of allocators.
+enum AllocatorType {
+  kAllocatorTypeBumpPointer,  // Use BumpPointer allocator, has entrypoints.
+  kAllocatorTypeTLAB,  // Use TLAB allocator, has entrypoints.
+  kAllocatorTypeRosAlloc,  // Use RosAlloc allocator, has entrypoints.
+  kAllocatorTypeDlMalloc,  // Use dlmalloc allocator, has entrypoints.
+  kAllocatorTypeNonMoving,  // Special allocator for non moving objects, doesn't have entrypoints.
+  kAllocatorTypeLOS,  // Large object space, also doesn't have entrypoints.
 };
-std::ostream& operator<<(std::ostream& os, const GcCause& policy);
 
 // How we want to sanity check the heap's correctness.
 enum HeapVerificationMode {
@@ -101,14 +108,31 @@ enum HeapVerificationMode {
 };
 static constexpr HeapVerificationMode kDesiredHeapVerification = kNoHeapVerification;
 
+// If true, use rosalloc/RosAllocSpace instead of dlmalloc/DlMallocSpace
+static constexpr bool kUseRosAlloc = true;
+
+// The process state passed in from the activity manager, used to determine when to do trimming
+// and compaction.
+enum ProcessState {
+  kProcessStateJankPerceptible = 0,
+  kProcessStateJankImperceptible = 1,
+};
+std::ostream& operator<<(std::ostream& os, const ProcessState& process_state);
+
 class Heap {
  public:
+  // If true, measure the total allocation time.
+  static constexpr bool kMeasureAllocationTime = false;
+  // Primitive arrays larger than this size are put in the large object space.
+  static constexpr size_t kLargeObjectThreshold = 3 * kPageSize;
+
   static constexpr size_t kDefaultInitialSize = 2 * MB;
   static constexpr size_t kDefaultMaximumSize = 32 * MB;
   static constexpr size_t kDefaultMaxFree = 2 * MB;
   static constexpr size_t kDefaultMinFree = kDefaultMaxFree / 4;
   static constexpr size_t kDefaultLongPauseLogThreshold = MsToNs(5);
   static constexpr size_t kDefaultLongGCLogThreshold = MsToNs(100);
+  static constexpr size_t kDefaultTLABSize = 256 * KB;
 
   // Default target utilization.
   static constexpr double kDefaultTargetUtilization = 0.5;
@@ -121,27 +145,73 @@ class Heap {
   // ImageWriter output.
   explicit Heap(size_t initial_size, size_t growth_limit, size_t min_free,
                 size_t max_free, double target_utilization, size_t capacity,
-                const std::string& original_image_file_name, bool concurrent_gc,
+                const std::string& original_image_file_name,
+                CollectorType post_zygote_collector_type, CollectorType background_collector_type,
                 size_t parallel_gc_threads, size_t conc_gc_threads, bool low_memory_mode,
-                size_t long_pause_threshold, size_t long_gc_threshold, bool ignore_max_footprint);
+                size_t long_pause_threshold, size_t long_gc_threshold,
+                bool ignore_max_footprint, bool use_tlab, bool verify_pre_gc_heap,
+                bool verify_post_gc_heap);
 
   ~Heap();
 
   // Allocates and initializes storage for an object instance.
+  template <bool kInstrumented>
   mirror::Object* AllocObject(Thread* self, mirror::Class* klass, size_t num_bytes)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return AllocObjectWithAllocator<kInstrumented, true>(self, klass, num_bytes,
+                                                         GetCurrentAllocator());
+  }
+  template <bool kInstrumented>
+  mirror::Object* AllocNonMovableObject(Thread* self, mirror::Class* klass, size_t num_bytes)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    return AllocObjectWithAllocator<kInstrumented, true>(self, klass, num_bytes,
+                                                         GetCurrentNonMovingAllocator());
+  }
+  template <bool kInstrumented, bool kCheckLargeObject, typename PreFenceVisitor = VoidFunctor>
+  ALWAYS_INLINE mirror::Object* AllocObjectWithAllocator(
+      Thread* self, mirror::Class* klass, size_t byte_count, AllocatorType allocator,
+      const PreFenceVisitor& pre_fence_visitor = VoidFunctor())
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  void RegisterNativeAllocation(int bytes)
+  AllocatorType GetCurrentAllocator() const {
+    return current_allocator_;
+  }
+
+  AllocatorType GetCurrentNonMovingAllocator() const {
+    return current_non_moving_allocator_;
+  }
+
+  // Visit all of the live objects in the heap.
+  void VisitObjects(ObjectVisitorCallback callback, void* arg)
+      SHARED_LOCKS_REQUIRED(Locks::heap_bitmap_lock_, Locks::mutator_lock_);
+
+  void SwapSemiSpaces() EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  void DebugCheckPreconditionsForAllocObject(mirror::Class* c, size_t byte_count)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void RegisterNativeFree(int bytes) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void ThrowOutOfMemoryError(size_t byte_count, bool large_object_allocation);
+
+  void RegisterNativeAllocation(JNIEnv* env, int bytes);
+  void RegisterNativeFree(JNIEnv* env, int bytes);
+
+  // Change the allocator, updates entrypoints.
+  void ChangeAllocator(AllocatorType allocator);
+
+  // Transition the garbage collector during runtime, may copy objects from one space to another.
+  void TransitionCollector(CollectorType collector_type);
+
+  // Change the collector to be one of the possible options (MS, CMS, SS).
+  void ChangeCollector(CollectorType collector_type);
 
   // The given reference is believed to be to an object in the Java heap, check the soundness of it.
   void VerifyObjectImpl(const mirror::Object* o);
   void VerifyObject(const mirror::Object* o) {
-    if (o != NULL && this != NULL && verify_object_mode_ > kNoHeapVerification) {
+    if (o != nullptr && this != nullptr && verify_object_mode_ > kNoHeapVerification) {
       VerifyObjectImpl(o);
     }
   }
+  // Check that c.getClass() == c.getClass().getClass().
+  bool VerifyClassClass(const mirror::Class* c) const;
 
   // Check sanity of all live references.
   void VerifyHeap() LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
@@ -155,13 +225,27 @@ class Heap {
   // A weaker test than IsLiveObject or VerifyObject that doesn't require the heap lock,
   // and doesn't abort on error, allowing the caller to report more
   // meaningful diagnostics.
-  bool IsHeapAddress(const mirror::Object* obj);
+  bool IsValidObjectAddress(const mirror::Object* obj) const;
+
+  // Returns true if the address passed in is a heap address, doesn't need to be aligned.
+  bool IsHeapAddress(const mirror::Object* obj) const;
 
   // Returns true if 'obj' is a live heap object, false otherwise (including for invalid addresses).
   // Requires the heap lock to be held.
   bool IsLiveObjectLocked(const mirror::Object* obj, bool search_allocation_stack = true,
                           bool search_live_stack = true, bool sorted = false)
       SHARED_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
+
+  // Returns true if there is any chance that the object (obj) will move.
+  bool IsMovableObject(const mirror::Object* obj) const;
+
+  // Returns true if an object is in the temp space, if this happens its usually indicative of
+  // compaction related errors.
+  bool IsInTempSpace(const mirror::Object* obj) const;
+
+  // Enables us to prevent GC until objects are released.
+  void IncrementDisableGC(Thread* self);
+  void DecrementDisableGC(Thread* self);
 
   // Initiates an explicit garbage collection.
   void CollectGarbage(bool clear_soft_references) LOCKS_EXCLUDED(Locks::mutator_lock_);
@@ -207,9 +291,12 @@ class Heap {
   // from the system. Doesn't allow the space to exceed its growth limit.
   void SetIdealFootprint(size_t max_allowed_footprint);
 
-  // Blocks the caller until the garbage collector becomes idle and returns
-  // true if we waited for the GC to complete.
-  collector::GcType WaitForConcurrentGcToComplete(Thread* self) LOCKS_EXCLUDED(gc_complete_lock_);
+  // Blocks the caller until the garbage collector becomes idle and returns the type of GC we
+  // waited for.
+  collector::GcType WaitForGcToComplete(Thread* self) LOCKS_EXCLUDED(gc_complete_lock_);
+
+  // Update the heap's process state to a new value, may cause compaction to occur.
+  void UpdateProcessState(ProcessState process_state);
 
   const std::vector<space::ContinuousSpace*>& GetContinuousSpaces() const {
     return continuous_spaces_;
@@ -224,29 +311,26 @@ class Heap {
                            MemberOffset reference_queueNext_offset,
                            MemberOffset reference_pendingNext_offset,
                            MemberOffset finalizer_reference_zombie_offset);
-
-  mirror::Object* GetReferenceReferent(mirror::Object* reference);
-  void ClearReferenceReferent(mirror::Object* reference) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  // Returns true if the reference object has not yet been enqueued.
-  bool IsEnqueuable(const mirror::Object* ref);
-  void EnqueueReference(mirror::Object* ref, mirror::Object** list)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  bool IsEnqueued(mirror::Object* ref) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void EnqueuePendingReference(mirror::Object* ref, mirror::Object** list)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  mirror::Object* DequeuePendingReference(mirror::Object** list)
-      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-
-  MemberOffset GetReferencePendingNextOffset() {
-    DCHECK_NE(reference_pendingNext_offset_.Uint32Value(), 0U);
+  MemberOffset GetReferenceReferentOffset() const {
+    return reference_referent_offset_;
+  }
+  MemberOffset GetReferenceQueueOffset() const {
+    return reference_queue_offset_;
+  }
+  MemberOffset GetReferenceQueueNextOffset() const {
+    return reference_queueNext_offset_;
+  }
+  MemberOffset GetReferencePendingNextOffset() const {
     return reference_pendingNext_offset_;
   }
-
-  MemberOffset GetFinalizerReferenceZombieOffset() {
-    DCHECK_NE(finalizer_reference_zombie_offset_.Uint32Value(), 0U);
+  MemberOffset GetFinalizerReferenceZombieOffset() const {
     return finalizer_reference_zombie_offset_;
   }
+  static mirror::Object* PreserveSoftReferenceCallback(mirror::Object* obj, void* arg);
+  void ProcessReferences(TimingLogger& timings, bool clear_soft, RootVisitor* is_marked_callback,
+                         RootVisitor* recursive_mark_object_callback, void* arg)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_)
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
 
   // Enable verification of object references when the runtime is sufficiently initialized.
   void EnableObjectValidation() {
@@ -272,11 +356,14 @@ class Heap {
     return low_memory_mode_;
   }
 
-  void RecordFree(size_t freed_objects, size_t freed_bytes);
+  // Freed bytes can be negative in cases where we copy objects from a compacted space to a
+  // free-list backed space.
+  void RecordFree(int64_t freed_objects, int64_t freed_bytes);
 
   // Must be called if a field of an Object in the heap changes, and before any GC safe-point.
   // The call is not needed if NULL is stored in the field.
-  void WriteBarrierField(const mirror::Object* dst, MemberOffset /*offset*/, const mirror::Object* /*new_value*/) {
+  void WriteBarrierField(const mirror::Object* dst, MemberOffset /*offset*/,
+                         const mirror::Object* /*new_value*/) {
     card_table_->MarkCard(dst);
   }
 
@@ -284,6 +371,10 @@ class Heap {
   void WriteBarrierArray(const mirror::Object* dst, int /*start_offset*/,
                          size_t /*length TODO: element_count or byte_count?*/) {
     card_table_->MarkCard(dst);
+  }
+
+  void WriteBarrierEveryFieldOf(const mirror::Object* obj) {
+    card_table_->MarkCard(obj);
   }
 
   accounting::CardTable* GetCardTable() const {
@@ -298,7 +389,7 @@ class Heap {
   }
 
   // Returns the number of objects currently allocated.
-  size_t GetObjectsAllocated() const;
+  size_t GetObjectsAllocated() const LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
 
   // Returns the total number of objects allocated since the heap was created.
   size_t GetObjectsAllocatedEver() const;
@@ -343,7 +434,11 @@ class Heap {
 
   void DumpForSigQuit(std::ostream& os);
 
-  size_t Trim();
+  // Trim the managed and native heaps by releasing unused memory back to the OS.
+  void Trim();
+
+  void RevokeThreadLocalBuffers(Thread* thread);
+  void RevokeAllThreadLocalBuffers();
 
   accounting::HeapBitmap* GetLiveBitmap() SHARED_LOCKS_REQUIRED(Locks::heap_bitmap_lock_) {
     return live_bitmap_.get();
@@ -357,61 +452,64 @@ class Heap {
     return live_stack_.get();
   }
 
-  void PreZygoteFork() LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
+  void PreZygoteFork() NO_THREAD_SAFETY_ANALYSIS;
 
   // Mark and empty stack.
   void FlushAllocStack()
       EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
 
   // Mark all the objects in the allocation stack in the specified bitmap.
-  void MarkAllocStack(accounting::SpaceBitmap* bitmap, accounting::SpaceSetMap* large_objects,
-                      accounting::ObjectStack* stack)
+  void MarkAllocStack(accounting::SpaceBitmap* bitmap1, accounting::SpaceBitmap* bitmap2,
+                      accounting::ObjectSet* large_objects, accounting::ObjectStack* stack)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
 
-  // Update and mark mod union table based on gc type.
-  void UpdateAndMarkModUnion(collector::MarkSweep* mark_sweep, base::TimingLogger& timings,
-                             collector::GcType gc_type)
+  // Mark the specified allocation stack as live.
+  void MarkAllocStackAsLive(accounting::ObjectStack* stack)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::heap_bitmap_lock_);
-
-  // Gets called when we get notified by ActivityThread that the process state has changed.
-  void ListenForProcessStateChange();
 
   // DEPRECATED: Should remove in "near" future when support for multiple image spaces is added.
   // Assumes there is only one image space.
   space::ImageSpace* GetImageSpace() const;
 
-  space::DlMallocSpace* GetAllocSpace() const {
-    return alloc_space_;
+  space::DlMallocSpace* GetDlMallocSpace() const {
+    return dlmalloc_space_;
+  }
+
+  space::RosAllocSpace* GetRosAllocSpace() const {
+    return rosalloc_space_;
+  }
+
+  space::MallocSpace* GetNonMovingSpace() const {
+    return non_moving_space_;
   }
 
   space::LargeObjectSpace* GetLargeObjectsSpace() const {
     return large_object_space_;
   }
 
-  Mutex* GetSoftRefQueueLock() {
-    return soft_ref_queue_lock_;
+  // Returns the free list space that may contain movable objects (the
+  // one that's not the non-moving space), either rosalloc_space_ or
+  // dlmalloc_space_.
+  space::MallocSpace* GetPrimaryFreeListSpace() {
+    if (kUseRosAlloc) {
+      DCHECK(rosalloc_space_ != nullptr);
+      // reinterpret_cast is necessary as the space class hierarchy
+      // isn't known (#included) yet here.
+      return reinterpret_cast<space::MallocSpace*>(rosalloc_space_);
+    } else {
+      DCHECK(dlmalloc_space_ != nullptr);
+      return reinterpret_cast<space::MallocSpace*>(dlmalloc_space_);
+    }
   }
 
-  Mutex* GetWeakRefQueueLock() {
-    return weak_ref_queue_lock_;
-  }
-
-  Mutex* GetFinalizerRefQueueLock() {
-    return finalizer_ref_queue_lock_;
-  }
-
-  Mutex* GetPhantomRefQueueLock() {
-    return phantom_ref_queue_lock_;
-  }
-
-  void DumpSpaces();
+  void DumpSpaces(std::ostream& stream = LOG(INFO));
 
   // GC performance measuring
   void DumpGcPerformanceInfo(std::ostream& os);
 
   // Returns true if we currently care about pause times.
   bool CareAboutPauseTimes() const {
-    return care_about_pause_times_;
+    return process_state_ == kProcessStateJankPerceptible;
   }
 
   // Thread pool.
@@ -426,43 +524,95 @@ class Heap {
   size_t GetConcGCThreadCount() const {
     return conc_gc_threads_;
   }
+  accounting::ModUnionTable* FindModUnionTableFromSpace(space::Space* space);
+  void AddModUnionTable(accounting::ModUnionTable* mod_union_table);
+
+  bool IsCompilingBoot() const;
+  bool HasImageSpace() const;
 
  private:
-  // Allocates uninitialized storage. Passing in a null space tries to place the object in the
-  // large object space.
-  template <class T> mirror::Object* Allocate(Thread* self, T* space, size_t num_bytes, size_t* bytes_allocated)
-      LOCKS_EXCLUDED(Locks::thread_suspend_count_lock_)
+  void Compact(space::ContinuousMemMapAllocSpace* target_space,
+               space::ContinuousMemMapAllocSpace* source_space);
+
+  bool StartGC(Thread* self) LOCKS_EXCLUDED(gc_complete_lock_);
+  void FinishGC(Thread* self, collector::GcType gc_type) LOCKS_EXCLUDED(gc_complete_lock_);
+
+  static ALWAYS_INLINE bool AllocatorHasAllocationStack(AllocatorType allocator_type) {
+    return
+        allocator_type != kAllocatorTypeBumpPointer &&
+        allocator_type != kAllocatorTypeTLAB;
+  }
+  static ALWAYS_INLINE bool AllocatorMayHaveConcurrentGC(AllocatorType allocator_type) {
+    return AllocatorHasAllocationStack(allocator_type);
+  }
+  bool ShouldAllocLargeObject(mirror::Class* c, size_t byte_count) const;
+  ALWAYS_INLINE void CheckConcurrentGC(Thread* self, size_t new_num_bytes_allocated,
+                                       mirror::Object* obj);
+
+  // We don't force this to be inlined since it is a slow path.
+  template <bool kInstrumented, typename PreFenceVisitor>
+  mirror::Object* AllocLargeObject(Thread* self, mirror::Class* klass, size_t byte_count,
+                                   const PreFenceVisitor& pre_fence_visitor)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Handles Allocate()'s slow allocation path with GC involved after
   // an initial allocation attempt failed.
-  mirror::Object* AllocateInternalWithGc(Thread* self, space::AllocSpace* space, size_t num_bytes,
-                                         size_t* bytes_allocated)
+  mirror::Object* AllocateInternalWithGc(Thread* self, AllocatorType allocator, size_t num_bytes,
+                                         size_t* bytes_allocated, mirror::Class** klass)
       LOCKS_EXCLUDED(Locks::thread_suspend_count_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  // Try to allocate a number of bytes, this function never does any GCs.
-  mirror::Object* TryToAllocate(Thread* self, space::AllocSpace* space, size_t alloc_size, bool grow,
-                                size_t* bytes_allocated)
-      LOCKS_EXCLUDED(Locks::thread_suspend_count_lock_)
+  // Allocate into a specific space.
+  mirror::Object* AllocateInto(Thread* self, space::AllocSpace* space, mirror::Class* c,
+                               size_t bytes)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  // Try to allocate a number of bytes, this function never does any GCs. DlMallocSpace-specialized version.
-  mirror::Object* TryToAllocate(Thread* self, space::DlMallocSpace* space, size_t alloc_size, bool grow,
-                                size_t* bytes_allocated)
-      LOCKS_EXCLUDED(Locks::thread_suspend_count_lock_)
+  // Try to allocate a number of bytes, this function never does any GCs. Needs to be inlined so
+  // that the switch statement is constant optimized in the entrypoints.
+  template <const bool kInstrumented, const bool kGrow>
+  ALWAYS_INLINE mirror::Object* TryToAllocate(Thread* self, AllocatorType allocator_type,
+                                              size_t alloc_size, size_t* bytes_allocated)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
-  bool IsOutOfMemoryOnAllocation(size_t alloc_size, bool grow);
+  void ThrowOutOfMemoryError(Thread* self, size_t byte_count, bool large_object_allocation)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  template <bool kGrow>
+  bool IsOutOfMemoryOnAllocation(AllocatorType allocator_type, size_t alloc_size);
 
   // Pushes a list of cleared references out to the managed heap.
-  void EnqueueClearedReferences(mirror::Object** cleared_references);
+  void SetReferenceReferent(mirror::Object* reference, mirror::Object* referent)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  mirror::Object* GetReferenceReferent(mirror::Object* reference)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void ClearReferenceReferent(mirror::Object* reference)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    SetReferenceReferent(reference, nullptr);
+  }
+  void EnqueueClearedReferences();
+  // Returns true if the reference object has not yet been enqueued.
+  bool IsEnqueuable(const mirror::Object* ref) const;
+  bool IsEnqueued(mirror::Object* ref) const;
+  void DelayReferenceReferent(mirror::Class* klass, mirror::Object* obj, RootVisitor mark_visitor,
+                              void* arg) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // Run the finalizers.
+  void RunFinalization(JNIEnv* env);
+
+  // Blocks the caller until the garbage collector becomes idle and returns the type of GC we
+  // waited for.
+  collector::GcType WaitForGcToCompleteLocked(Thread* self)
+      EXCLUSIVE_LOCKS_REQUIRED(gc_complete_lock_);
 
   void RequestHeapTrim() LOCKS_EXCLUDED(Locks::runtime_shutdown_lock_);
   void RequestConcurrentGC(Thread* self) LOCKS_EXCLUDED(Locks::runtime_shutdown_lock_);
   bool IsGCRequestPending() const;
 
-  void RecordAllocation(size_t size, mirror::Object* object)
+  size_t RecordAllocationInstrumented(size_t size, mirror::Object* object)
+      LOCKS_EXCLUDED(GlobalSynchronization::heap_bitmap_lock_)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  size_t RecordAllocationUninstrumented(size_t size, mirror::Object* object)
       LOCKS_EXCLUDED(GlobalSynchronization::heap_bitmap_lock_)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
@@ -476,8 +626,9 @@ class Heap {
 
   void PreGcVerification(collector::GarbageCollector* gc);
   void PreSweepingGcVerification(collector::GarbageCollector* gc)
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void PostGcVerification(collector::GarbageCollector* gc)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
-  void PostGcVerification(collector::GarbageCollector* gc);
 
   // Update the watermark for the native allocated bytes based on the current number of native
   // bytes allocated and the target utilization ratio.
@@ -490,9 +641,9 @@ class Heap {
 
   size_t GetPercentFree();
 
-  void AddContinuousSpace(space::ContinuousSpace* space) LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
-  void AddDiscontinuousSpace(space::DiscontinuousSpace* space)
+  void AddSpace(space::Space* space, bool set_as_default = true)
       LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
+  void RemoveSpace(space::Space* space) LOCKS_EXCLUDED(Locks::heap_bitmap_lock_);
 
   // No thread saftey analysis since we call this everywhere and it is impossible to find a proper
   // lock ordering for it.
@@ -505,7 +656,7 @@ class Heap {
   void SwapStacks();
 
   // Clear cards and update the mod union table.
-  void ProcessCards(base::TimingLogger& timings);
+  void ProcessCards(TimingLogger& timings);
 
   // All-known continuous spaces, where objects lie within fixed bounds.
   std::vector<space::ContinuousSpace*> continuous_spaces_;
@@ -513,8 +664,22 @@ class Heap {
   // All-known discontinuous spaces, where objects may be placed throughout virtual memory.
   std::vector<space::DiscontinuousSpace*> discontinuous_spaces_;
 
-  // The allocation space we are currently allocating into.
-  space::DlMallocSpace* alloc_space_;
+  // All-known alloc spaces, where objects may be or have been allocated.
+  std::vector<space::AllocSpace*> alloc_spaces_;
+
+  // A space where non-movable objects are allocated, when compaction is enabled it contains
+  // Classes, ArtMethods, ArtFields, and non moving objects.
+  space::MallocSpace* non_moving_space_;
+
+  // Space which we use for the kAllocatorTypeROSAlloc.
+  space::RosAllocSpace* rosalloc_space_;
+
+  // Space which we use for the kAllocatorTypeDlMalloc.
+  space::DlMallocSpace* dlmalloc_space_;
+
+  // The main space is the space which the GC copies to and from on process state updates. This
+  // space is typically either the dlmalloc_space_ or the rosalloc_space_.
+  space::MallocSpace* main_space_;
 
   // The large object space we are currently allocating into.
   space::LargeObjectSpace* large_object_space_;
@@ -522,16 +687,26 @@ class Heap {
   // The card table, dirtied by the write barrier.
   UniquePtr<accounting::CardTable> card_table_;
 
-  // The mod-union table remembers all of the references from the image space to the alloc /
-  // zygote spaces to allow the card table to be cleared.
-  UniquePtr<accounting::ModUnionTable> image_mod_union_table_;
+  // A mod-union table remembers all of the references from the it's space to other spaces.
+  SafeMap<space::Space*, accounting::ModUnionTable*> mod_union_tables_;
 
-  // This table holds all of the references from the zygote space to the alloc space.
-  UniquePtr<accounting::ModUnionTable> zygote_mod_union_table_;
+  // Keep the free list allocator mem map lying around when we transition to background so that we
+  // don't have to worry about virtual address space fragmentation.
+  UniquePtr<MemMap> allocator_mem_map_;
 
-  // What kind of concurrency behavior is the runtime after? True for concurrent mark sweep GC,
-  // false for stop-the-world mark sweep.
-  const bool concurrent_gc_;
+  // The mem-map which we will use for the non-moving space after the zygote is done forking:
+  UniquePtr<MemMap> post_zygote_non_moving_space_mem_map_;
+
+  // What kind of concurrency behavior is the runtime after? Currently true for concurrent mark
+  // sweep GC, false for other GC types.
+  bool concurrent_gc_;
+
+  // The current collector type.
+  CollectorType collector_type_;
+  // Which collector we will switch to after zygote fork.
+  CollectorType post_zygote_collector_type_;
+  // Which collector we will use when the app is notified of a transition to background.
+  CollectorType background_collector_type_;
 
   // How many GC threads we may use for paused parts of garbage collection.
   const size_t parallel_gc_threads_;
@@ -556,17 +731,22 @@ class Heap {
   // If we have a zygote space.
   bool have_zygote_space_;
 
+  // Number of pinned primitive arrays in the movable space.
+  // Block all GC until this hits zero, or we hit the timeout!
+  size_t number_gc_blockers_;
+  static constexpr size_t KGCBlockTimeout = 30000;
+
   // Guards access to the state of GC, associated conditional variable is used to signal when a GC
   // completes.
   Mutex* gc_complete_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   UniquePtr<ConditionVariable> gc_complete_cond_ GUARDED_BY(gc_complete_lock_);
 
-  // Mutexes held when adding references to reference queues.
-  // TODO: move to a UniquePtr, currently annotalysis is confused that UniquePtr isn't lockable.
-  Mutex* soft_ref_queue_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  Mutex* weak_ref_queue_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  Mutex* finalizer_ref_queue_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  Mutex* phantom_ref_queue_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  // Reference queues.
+  ReferenceQueue soft_reference_queue_;
+  ReferenceQueue weak_reference_queue_;
+  ReferenceQueue finalizer_reference_queue_;
+  ReferenceQueue phantom_reference_queue_;
+  ReferenceQueue cleared_references_;
 
   // True while the garbage collector is running.
   volatile bool is_gc_running_ GUARDED_BY(gc_complete_lock_);
@@ -592,18 +772,11 @@ class Heap {
   // The watermark at which a GC is performed inside of registerNativeAllocation.
   size_t native_footprint_limit_;
 
-  // Activity manager members.
-  jclass activity_thread_class_;
-  jclass application_thread_class_;
-  jobject activity_thread_;
-  jobject application_thread_;
-  jfieldID last_process_state_id_;
-
-  // Process states which care about pause times.
-  std::set<int> process_state_cares_about_pause_time_;
+  // Whether or not we need to run finalizers in the next native allocation.
+  bool native_need_to_run_finalization_;
 
   // Whether or not we currently care about pause times.
-  bool care_about_pause_times_;
+  ProcessState process_state_;
 
   // When num_bytes_allocated_ exceeds this amount then a concurrent GC should be requested so that
   // it completes ahead of an allocation failing.
@@ -614,9 +787,6 @@ class Heap {
 
   // Since the heap was created, how many objects have been freed.
   size_t total_objects_freed_ever_;
-
-  // Primitive objects larger than this size are put in the large object space.
-  const size_t large_object_threshold_;
 
   // Number of bytes allocated.  Adjusted after each allocation and free.
   AtomicInteger num_bytes_allocated_;
@@ -636,14 +806,6 @@ class Heap {
 
   // Parallel GC data structures.
   UniquePtr<ThreadPool> thread_pool_;
-
-  // Sticky mark bits GC has some overhead, so if we have less a few megabytes of AllocSpace then
-  // it's probably better to just do a partial GC.
-  const size_t min_alloc_space_size_for_sticky_gc_;
-
-  // Minimum remaining size for sticky GC. Since sticky GC doesn't free up as much memory as a
-  // normal GC, it is important to not use it when we are almost out of memory.
-  const size_t min_remaining_space_for_sticky_gc_;
 
   // The last time a heap trim occurred.
   uint64_t last_trim_time_ms_;
@@ -668,24 +830,31 @@ class Heap {
   // Allocation stack, new allocations go here so that we can do sticky mark bits. This enables us
   // to use the live bitmap as the old mark bitmap.
   const size_t max_allocation_stack_size_;
-  bool is_allocation_stack_sorted_;
   UniquePtr<accounting::ObjectStack> allocation_stack_;
 
   // Second allocation stack so that we can process allocation with the heap unlocked.
   UniquePtr<accounting::ObjectStack> live_stack_;
 
+  // Allocator type.
+  AllocatorType current_allocator_;
+  const AllocatorType current_non_moving_allocator_;
+
+  // Which GCs we run in order when we an allocation fails.
+  std::vector<collector::GcType> gc_plan_;
+
+  // Bump pointer spaces.
+  space::BumpPointerSpace* bump_pointer_space_;
+  // Temp space is the space which the semispace collector copies to.
+  space::BumpPointerSpace* temp_space_;
+
   // offset of java.lang.ref.Reference.referent
   MemberOffset reference_referent_offset_;
-
   // offset of java.lang.ref.Reference.queue
   MemberOffset reference_queue_offset_;
-
   // offset of java.lang.ref.Reference.queueNext
   MemberOffset reference_queueNext_offset_;
-
   // offset of java.lang.ref.Reference.pendingNext
   MemberOffset reference_pendingNext_offset_;
-
   // offset of java.lang.ref.FinalizerReference.zombie
   MemberOffset finalizer_reference_zombie_offset_;
 
@@ -708,16 +877,33 @@ class Heap {
   // The current state of heap verification, may be enabled or disabled.
   HeapVerificationMode verify_object_mode_;
 
-  std::vector<collector::MarkSweep*> mark_sweep_collectors_;
+  // GC disable count, error on GC if > 0.
+  size_t gc_disable_count_ GUARDED_BY(gc_complete_lock_);
+
+  std::vector<collector::GarbageCollector*> garbage_collectors_;
+  collector::SemiSpace* semi_space_collector_;
 
   const bool running_on_valgrind_;
+  const bool use_tlab_;
 
   friend class collector::MarkSweep;
+  friend class collector::SemiSpace;
+  friend class ReferenceQueue;
   friend class VerifyReferenceCardVisitor;
   friend class VerifyReferenceVisitor;
   friend class VerifyObjectVisitor;
   friend class ScopedHeapLock;
   friend class space::SpaceTest;
+
+  class AllocationTimer {
+   private:
+    Heap* heap_;
+    mirror::Object** allocated_obj_ptr_;
+    uint64_t allocation_start_time_;
+   public:
+    AllocationTimer(Heap* heap, mirror::Object** allocated_obj_ptr);
+    ~AllocationTimer();
+  };
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Heap);
 };

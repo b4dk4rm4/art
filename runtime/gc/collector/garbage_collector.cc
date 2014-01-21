@@ -21,12 +21,13 @@
 
 #include "garbage_collector.h"
 
+#include "base/histogram-inl.h"
 #include "base/logging.h"
 #include "base/mutex-inl.h"
 #include "gc/accounting/heap_bitmap.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
-#include "thread.h"
+#include "thread-inl.h"
 #include "thread_list.h"
 
 namespace art {
@@ -36,9 +37,12 @@ namespace collector {
 GarbageCollector::GarbageCollector(Heap* heap, const std::string& name)
     : heap_(heap),
       name_(name),
+      gc_cause_(kGcCauseForAlloc),
+      clear_soft_references_(false),
       verbose_(VLOG_IS_ON(heap)),
       duration_ns_(0),
       timings_(name_.c_str(), true, verbose_),
+      pause_histogram_((name_ + " paused").c_str(), kPauseBucketSize, kPauseBucketCount),
       cumulative_timings_(name) {
   ResetCumulativeStatistics();
 }
@@ -54,17 +58,26 @@ void GarbageCollector::RegisterPause(uint64_t nano_length) {
 
 void GarbageCollector::ResetCumulativeStatistics() {
   cumulative_timings_.Reset();
+  pause_histogram_.Reset();
   total_time_ns_ = 0;
-  total_paused_time_ns_ = 0;
   total_freed_objects_ = 0;
   total_freed_bytes_ = 0;
 }
 
-void GarbageCollector::Run() {
+void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
   ThreadList* thread_list = Runtime::Current()->GetThreadList();
+  Thread* self = Thread::Current();
   uint64_t start_time = NanoTime();
   pause_times_.clear();
   duration_ns_ = 0;
+  clear_soft_references_ = clear_soft_references;
+  gc_cause_ = gc_cause;
+
+  // Reset stats.
+  freed_bytes_ = 0;
+  freed_large_object_bytes_ = 0;
+  freed_objects_ = 0;
+  freed_large_objects_ = 0;
 
   InitializePhase();
 
@@ -72,14 +85,23 @@ void GarbageCollector::Run() {
     // Pause is the entire length of the GC.
     uint64_t pause_start = NanoTime();
     ATRACE_BEGIN("Application threads suspended");
-    thread_list->SuspendAll();
-    MarkingPhase();
-    ReclaimPhase();
-    thread_list->ResumeAll();
+    // Mutator lock may be already exclusively held when we do garbage collections for changing the
+    // current collector / allocator during process state updates.
+    if (Locks::mutator_lock_->IsExclusiveHeld(self)) {
+      GetHeap()->RevokeAllThreadLocalBuffers();
+      MarkingPhase();
+      ReclaimPhase();
+    } else {
+      thread_list->SuspendAll();
+      GetHeap()->RevokeAllThreadLocalBuffers();
+      MarkingPhase();
+      ReclaimPhase();
+      thread_list->ResumeAll();
+    }
     ATRACE_END();
-    uint64_t pause_end = NanoTime();
-    pause_times_.push_back(pause_end - pause_start);
+    RegisterPause(NanoTime() - pause_start);
   } else {
+    CHECK(!Locks::mutator_lock_->IsExclusiveHeld(self));
     Thread* self = Thread::Current();
     {
       ReaderMutexLock mu(self, *Locks::mutator_lock_);
@@ -93,23 +115,28 @@ void GarbageCollector::Run() {
       ATRACE_END();
       ATRACE_BEGIN("All mutator threads suspended");
       done = HandleDirtyObjectsPhase();
+      if (done) {
+        GetHeap()->RevokeAllThreadLocalBuffers();
+      }
       ATRACE_END();
       uint64_t pause_end = NanoTime();
       ATRACE_BEGIN("Resuming mutator threads");
       thread_list->ResumeAll();
       ATRACE_END();
-      pause_times_.push_back(pause_end - pause_start);
+      RegisterPause(pause_end - pause_start);
     }
     {
       ReaderMutexLock mu(self, *Locks::mutator_lock_);
       ReclaimPhase();
     }
   }
-
+  FinishPhase();
   uint64_t end_time = NanoTime();
   duration_ns_ = end_time - start_time;
-
-  FinishPhase();
+  total_time_ns_ += GetDurationNs();
+  for (uint64_t pause_time : pause_times_) {
+    pause_histogram_.AddValue(pause_time / 1000);
+  }
 }
 
 void GarbageCollector::SwapBitmaps() {
@@ -127,14 +154,14 @@ void GarbageCollector::SwapBitmaps() {
       if (live_bitmap != mark_bitmap) {
         heap_->GetLiveBitmap()->ReplaceBitmap(live_bitmap, mark_bitmap);
         heap_->GetMarkBitmap()->ReplaceBitmap(mark_bitmap, live_bitmap);
-        space->AsDlMallocSpace()->SwapBitmaps();
+        space->AsMallocSpace()->SwapBitmaps();
       }
     }
   }
   for (const auto& disc_space : GetHeap()->GetDiscontinuousSpaces()) {
     space::LargeObjectSpace* space = down_cast<space::LargeObjectSpace*>(disc_space);
-    accounting::SpaceSetMap* live_set = space->GetLiveObjects();
-    accounting::SpaceSetMap* mark_set = space->GetMarkObjects();
+    accounting::ObjectSet* live_set = space->GetLiveObjects();
+    accounting::ObjectSet* mark_set = space->GetMarkObjects();
     heap_->GetLiveBitmap()->ReplaceObjectSet(live_set, mark_set);
     heap_->GetMarkBitmap()->ReplaceObjectSet(mark_set, live_set);
     down_cast<space::LargeObjectSpace*>(space)->SwapBitmaps();

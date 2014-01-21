@@ -208,7 +208,9 @@ DISASSEMBLER_ENTRY(cmp,
     reg_in_opcode = true;
     break;
   case 0x68: opcode << "push"; immediate_bytes = 4; break;
+  case 0x69: opcode << "imul"; load = true; has_modrm = true; immediate_bytes = 4; break;
   case 0x6A: opcode << "push"; immediate_bytes = 1; break;
+  case 0x6B: opcode << "imul"; load = true; has_modrm = true; immediate_bytes = 1; break;
   case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: case 0x76: case 0x77:
   case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F:
     static const char* condition_codes[] =
@@ -314,6 +316,12 @@ DISASSEMBLER_ENTRY(cmp,
         break;
       case 0x3A:  // 3 byte extended opcode
         opcode << StringPrintf("unknown opcode '0F 3A %02X'", *instr);
+        break;
+      case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
+      case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+        opcode << "cmov" << condition_codes[*instr & 0xF];
+        has_modrm = true;
+        load = true;
         break;
       case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
       case 0x58: case 0x59: case 0x5C: case 0x5D: case 0x5E: case 0x5F: {
@@ -515,11 +523,23 @@ DISASSEMBLER_ENTRY(cmp,
           no_ops = true;
         }
         break;
+      case 0xAF: opcode << "imul"; has_modrm = true; load = true; break;
       case 0xB1: opcode << "cmpxchg"; has_modrm = true; store = true; break;
       case 0xB6: opcode << "movzxb"; has_modrm = true; load = true; break;
       case 0xB7: opcode << "movzxw"; has_modrm = true; load = true; break;
       case 0xBE: opcode << "movsxb"; has_modrm = true; load = true; break;
       case 0xBF: opcode << "movsxw"; has_modrm = true; load = true; break;
+      case 0xC7:
+        static const char* x0FxC7_opcodes[] = { "unknown-0f-c7", "cmpxchg8b", "unknown-0f-c7", "unknown-0f-c7", "unknown-0f-c7", "unknown-0f-c7", "unknown-0f-c7", "unknown-0f-c7" };
+        modrm_opcodes = x0FxC7_opcodes;
+        has_modrm = true;
+        reg_is_opcode = true;
+        store = true;
+        break;
+      case 0xC8: case 0xC9: case 0xCA: case 0xCB: case 0xCC: case 0xCD: case 0xCE: case 0xCF:
+        opcode << "bswap";
+        reg_in_opcode = true;
+        break;
       default:
         opcode << StringPrintf("unknown opcode '0F %02X'", *instr);
         break;
@@ -583,6 +603,20 @@ DISASSEMBLER_ENTRY(cmp,
     reg_is_opcode = true;
     break;
   case 0xCC: opcode << "int 3"; break;
+  case 0xD9:
+    static const char* d9_opcodes[] = {"flds", "unknown-d9", "fsts", "fstps", "fldenv", "fldcw", "fnstenv", "fnstcw"};
+    modrm_opcodes = d9_opcodes;
+    store = true;
+    has_modrm = true;
+    reg_is_opcode = true;
+    break;
+  case 0xDD:
+    static const char* dd_opcodes[] = {"fldl", "fisttp", "fstl", "fstpl", "frstor", "unknown-dd", "fnsave", "fnstsw"};
+    modrm_opcodes = dd_opcodes;
+    store = true;
+    has_modrm = true;
+    reg_is_opcode = true;
+    break;
   case 0xE8: opcode << "call"; branch_bytes = 4; break;
   case 0xE9: opcode << "jmp"; branch_bytes = 4; break;
   case 0xEB: opcode << "jmp"; branch_bytes = 1; break;

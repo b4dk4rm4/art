@@ -47,19 +47,19 @@ void InternTable::VisitRoots(RootVisitor* visitor, void* arg,
                              bool only_dirty, bool clean_dirty) {
   MutexLock mu(Thread::Current(), intern_table_lock_);
   if (!only_dirty || is_dirty_) {
-    for (const auto& strong_intern : strong_interns_) {
-      visitor(strong_intern.second, arg);
+    for (auto& strong_intern : strong_interns_) {
+      strong_intern.second = down_cast<mirror::String*>(visitor(strong_intern.second, arg));
+      DCHECK(strong_intern.second != nullptr);
     }
+
     if (clean_dirty) {
       is_dirty_ = false;
     }
   }
-  // Note: we deliberately don't visit the weak_interns_ table and the immutable
-  // image roots.
+  // Note: we deliberately don't visit the weak_interns_ table and the immutable image roots.
 }
 
-mirror::String* InternTable::Lookup(Table& table, mirror::String* s,
-                                    uint32_t hash_code) {
+mirror::String* InternTable::Lookup(Table& table, mirror::String* s, uint32_t hash_code) {
   intern_table_lock_.AssertHeld(Thread::Current());
   for (auto it = table.find(hash_code), end = table.end(); it != end; ++it) {
     mirror::String* existing_string = it->second;
@@ -70,8 +70,7 @@ mirror::String* InternTable::Lookup(Table& table, mirror::String* s,
   return NULL;
 }
 
-mirror::String* InternTable::Insert(Table& table, mirror::String* s,
-                                    uint32_t hash_code) {
+mirror::String* InternTable::Insert(Table& table, mirror::String* s, uint32_t hash_code) {
   intern_table_lock_.AssertHeld(Thread::Current());
   table.insert(std::make_pair(hash_code, s));
   return s;
@@ -216,14 +215,16 @@ bool InternTable::ContainsWeak(mirror::String* s) {
   return found == s;
 }
 
-void InternTable::SweepInternTableWeaks(IsMarkedTester is_marked, void* arg) {
+void InternTable::SweepInternTableWeaks(RootVisitor visitor, void* arg) {
   MutexLock mu(Thread::Current(), intern_table_lock_);
-  // TODO: std::remove_if + lambda.
   for (auto it = weak_interns_.begin(), end = weak_interns_.end(); it != end;) {
     mirror::Object* object = it->second;
-    if (!is_marked(object, arg)) {
+    mirror::Object* new_object = visitor(object, arg);
+    if (new_object == nullptr) {
+      // TODO: use it = weak_interns_.erase(it) when we get a c++11 stl.
       weak_interns_.erase(it++);
     } else {
+      it->second = down_cast<mirror::String*>(new_object);
       ++it;
     }
   }

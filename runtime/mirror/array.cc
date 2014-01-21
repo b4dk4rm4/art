@@ -32,39 +32,6 @@
 namespace art {
 namespace mirror {
 
-Array* Array::Alloc(Thread* self, Class* array_class, int32_t component_count,
-                    size_t component_size) {
-  DCHECK(array_class != NULL);
-  DCHECK_GE(component_count, 0);
-  DCHECK(array_class->IsArrayClass());
-
-  size_t header_size = sizeof(Object) + (component_size == sizeof(int64_t) ? 8 : 4);
-  size_t data_size = component_count * component_size;
-  size_t size = header_size + data_size;
-
-  // Check for overflow and throw OutOfMemoryError if this was an unreasonable request.
-  size_t component_shift = sizeof(size_t) * 8 - 1 - CLZ(component_size);
-  if (UNLIKELY(data_size >> component_shift != size_t(component_count) || size < data_size)) {
-    self->ThrowOutOfMemoryError(StringPrintf("%s of length %d would overflow",
-                                             PrettyDescriptor(array_class).c_str(),
-                                             component_count).c_str());
-    return NULL;
-  }
-
-  gc::Heap* heap = Runtime::Current()->GetHeap();
-  Array* array = down_cast<Array*>(heap->AllocObject(self, array_class, size));
-  if (array != NULL) {
-    DCHECK(array->IsArrayInstance());
-    array->SetLength(component_count);
-  }
-  return array;
-}
-
-Array* Array::Alloc(Thread* self, Class* array_class, int32_t component_count) {
-  DCHECK(array_class->IsArrayClass());
-  return Alloc(self, array_class, component_count, array_class->GetComponentSize());
-}
-
 // Create a multi-dimensional array of Objects or primitive types.
 //
 // We have to generate the names for X[], X[][], X[][][], and so on.  The
@@ -74,15 +41,15 @@ Array* Array::Alloc(Thread* self, Class* array_class, int32_t component_count) {
 // Recursively create an array with multiple dimensions.  Elements may be
 // Objects or primitive types.
 static Array* RecursiveCreateMultiArray(Thread* self, Class* array_class, int current_dimension,
-                                        IntArray* dimensions)
+                                        SirtRef<mirror::IntArray>& dimensions)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   int32_t array_length = dimensions->Get(current_dimension);
-  SirtRef<Array> new_array(self, Array::Alloc(self, array_class, array_length));
+  SirtRef<Array> new_array(self, Array::Alloc<true>(self, array_class, array_length));
   if (UNLIKELY(new_array.get() == NULL)) {
     CHECK(self->IsExceptionPending());
     return NULL;
   }
-  if ((current_dimension + 1) < dimensions->GetLength()) {
+  if (current_dimension + 1 < dimensions->GetLength()) {
     // Create a new sub-array in every element of the array.
     for (int32_t i = 0; i < array_length; i++) {
       Array* sub_array = RecursiveCreateMultiArray(self, array_class->GetComponentType(),
@@ -120,13 +87,15 @@ Array* Array::CreateMultiArray(Thread* self, Class* element_class, IntArray* dim
 
   // Find/generate the array class.
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  Class* array_class = class_linker->FindClass(descriptor.c_str(), element_class->GetClassLoader());
+  SirtRef<mirror::ClassLoader> class_loader(self, element_class->GetClassLoader());
+  Class* array_class = class_linker->FindClass(descriptor.c_str(), class_loader);
   if (UNLIKELY(array_class == NULL)) {
     CHECK(self->IsExceptionPending());
     return NULL;
   }
   // create the array
-  Array* new_array = RecursiveCreateMultiArray(self, array_class, 0, dimensions);
+  SirtRef<mirror::IntArray> sirt_dimensions(self, dimensions);
+  Array* new_array = RecursiveCreateMultiArray(self, array_class, 0, sirt_dimensions);
   if (UNLIKELY(new_array == NULL)) {
     CHECK(self->IsExceptionPending());
     return NULL;
@@ -145,7 +114,7 @@ void Array::ThrowArrayStoreException(Object* object) const {
 template<typename T>
 PrimitiveArray<T>* PrimitiveArray<T>::Alloc(Thread* self, size_t length) {
   DCHECK(array_class_ != NULL);
-  Array* raw_array = Array::Alloc(self, array_class_, length, sizeof(T));
+  Array* raw_array = Array::Alloc<true>(self, array_class_, length, sizeof(T));
   return down_cast<PrimitiveArray<T>*>(raw_array);
 }
 

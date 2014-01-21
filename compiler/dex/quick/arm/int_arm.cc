@@ -24,8 +24,7 @@
 
 namespace art {
 
-LIR* ArmMir2Lir::OpCmpBranch(ConditionCode cond, int src1,
-         int src2, LIR* target) {
+LIR* ArmMir2Lir::OpCmpBranch(ConditionCode cond, int src1, int src2, LIR* target) {
   OpRegReg(kOpCmp, src1, src2);
   return OpCondBranch(cond, target);
 }
@@ -98,7 +97,7 @@ void ArmMir2Lir::GenCmpLong(RegLocation rl_dest, RegLocation rl_src1,
   LIR* branch3 = OpCondBranch(kCondEq, NULL);
 
   OpIT(kCondHi, "E");
-  NewLIR2(kThumb2MovImmShift, t_reg, ModifiedImmediate(-1));
+  NewLIR2(kThumb2MovI8M, t_reg, ModifiedImmediate(-1));
   LoadConstant(t_reg, 1);
   GenBarrier();
 
@@ -123,37 +122,29 @@ void ArmMir2Lir::GenFusedLongCmpImmBranch(BasicBlock* bb, RegLocation rl_src1,
   int32_t val_hi = High32Bits(val);
   DCHECK_GE(ModifiedImmediate(val_lo), 0);
   DCHECK_GE(ModifiedImmediate(val_hi), 0);
-  LIR* taken = &block_label_list_[bb->taken->id];
-  LIR* not_taken = &block_label_list_[bb->fall_through->id];
+  LIR* taken = &block_label_list_[bb->taken];
+  LIR* not_taken = &block_label_list_[bb->fall_through];
   rl_src1 = LoadValueWide(rl_src1, kCoreReg);
   int32_t low_reg = rl_src1.low_reg;
   int32_t high_reg = rl_src1.high_reg;
 
+  if (val == 0 && (ccode == kCondEq || ccode == kCondNe)) {
+    int t_reg = AllocTemp();
+    NewLIR4(kThumb2OrrRRRs, t_reg, low_reg, high_reg, 0);
+    FreeTemp(t_reg);
+    OpCondBranch(ccode, taken);
+    return;
+  }
+
   switch (ccode) {
     case kCondEq:
     case kCondNe:
-      LIR* target;
-      ConditionCode condition;
-      if (ccode == kCondEq) {
-        target = not_taken;
-        condition = kCondEq;
-      } else {
-        target = taken;
-        condition = kCondNe;
-      }
-      if (val == 0) {
-        int t_reg = AllocTemp();
-        NewLIR4(kThumb2OrrRRRs, t_reg, low_reg, high_reg, 0);
-        FreeTemp(t_reg);
-        OpCondBranch(condition, taken);
-        return;
-      }
-      OpCmpImmBranch(kCondNe, high_reg, val_hi, target);
+      OpCmpImmBranch(kCondNe, high_reg, val_hi, (ccode == kCondEq) ? not_taken : taken);
       break;
     case kCondLt:
       OpCmpImmBranch(kCondLt, high_reg, val_hi, taken);
       OpCmpImmBranch(kCondGt, high_reg, val_hi, not_taken);
-      ccode = kCondCc;
+      ccode = kCondUlt;
       break;
     case kCondLe:
       OpCmpImmBranch(kCondLt, high_reg, val_hi, taken);
@@ -168,7 +159,7 @@ void ArmMir2Lir::GenFusedLongCmpImmBranch(BasicBlock* bb, RegLocation rl_src1,
     case kCondGe:
       OpCmpImmBranch(kCondGt, high_reg, val_hi, taken);
       OpCmpImmBranch(kCondLt, high_reg, val_hi, not_taken);
-      ccode = kCondCs;
+      ccode = kCondUge;
       break;
     default:
       LOG(FATAL) << "Unexpected ccode: " << ccode;
@@ -179,23 +170,6 @@ void ArmMir2Lir::GenFusedLongCmpImmBranch(BasicBlock* bb, RegLocation rl_src1,
 void ArmMir2Lir::GenSelect(BasicBlock* bb, MIR* mir) {
   RegLocation rl_result;
   RegLocation rl_src = mir_graph_->GetSrc(mir, 0);
-  // Temporary debugging code
-  int dest_sreg = mir->ssa_rep->defs[0];
-  if ((dest_sreg < 0) || (dest_sreg >= mir_graph_->GetNumSSARegs())) {
-    LOG(INFO) << "Bad target sreg: " << dest_sreg << ", in "
-              << PrettyMethod(cu_->method_idx, *cu_->dex_file);
-    LOG(INFO) << "at dex offset 0x" << std::hex << mir->offset;
-    LOG(INFO) << "vreg = " << mir_graph_->SRegToVReg(dest_sreg);
-    LOG(INFO) << "num uses = " << mir->ssa_rep->num_uses;
-    if (mir->ssa_rep->num_uses == 1) {
-      LOG(INFO) << "CONST case, vals = " << mir->dalvikInsn.vB << ", " << mir->dalvikInsn.vC;
-    } else {
-      LOG(INFO) << "MOVE case, operands = " << mir->ssa_rep->uses[1] << ", "
-                << mir->ssa_rep->uses[2];
-    }
-    CHECK(false) << "Invalid target sreg on Select.";
-  }
-  // End temporary debugging code
   RegLocation rl_dest = mir_graph_->GetDest(mir);
   rl_src = LoadValue(rl_src, kCoreReg);
   if (mir->ssa_rep->num_uses == 1) {
@@ -205,7 +179,7 @@ void ArmMir2Lir::GenSelect(BasicBlock* bb, MIR* mir) {
     rl_result = EvalLoc(rl_dest, kCoreReg, true);
     if ((true_val == 1) && (false_val == 0)) {
       OpRegRegImm(kOpRsub, rl_result.low_reg, rl_src.low_reg, 1);
-      OpIT(kCondCc, "");
+      OpIT(kCondUlt, "");
       LoadConstant(rl_result.low_reg, 0);
       GenBarrier();  // Add a scheduling barrier to keep the IT shadow intact
     } else if (InexpensiveConstantInt(true_val) && InexpensiveConstantInt(false_val)) {
@@ -234,11 +208,17 @@ void ArmMir2Lir::GenSelect(BasicBlock* bb, MIR* mir) {
     rl_false = LoadValue(rl_false, kCoreReg);
     rl_result = EvalLoc(rl_dest, kCoreReg, true);
     OpRegImm(kOpCmp, rl_src.low_reg, 0);
-    OpIT(kCondEq, "E");
-    LIR* l1 = OpRegCopy(rl_result.low_reg, rl_true.low_reg);
-    l1->flags.is_nop = false;  // Make sure this instruction isn't optimized away
-    LIR* l2 = OpRegCopy(rl_result.low_reg, rl_false.low_reg);
-    l2->flags.is_nop = false;  // Make sure this instruction isn't optimized away
+    if (rl_result.low_reg == rl_true.low_reg) {  // Is the "true" case already in place?
+      OpIT(kCondNe, "");
+      OpRegCopy(rl_result.low_reg, rl_false.low_reg);
+    } else if (rl_result.low_reg == rl_false.low_reg) {  // False case in place?
+      OpIT(kCondEq, "");
+      OpRegCopy(rl_result.low_reg, rl_true.low_reg);
+    } else {  // Normal - select between the two.
+      OpIT(kCondEq, "E");
+      OpRegCopy(rl_result.low_reg, rl_true.low_reg);
+      OpRegCopy(rl_result.low_reg, rl_false.low_reg);
+    }
     GenBarrier();  // Add a scheduling barrier to keep the IT shadow intact
   }
   StoreValue(rl_dest, rl_result);
@@ -250,9 +230,7 @@ void ArmMir2Lir::GenFusedLongCmpBranch(BasicBlock* bb, MIR* mir) {
   // Normalize such that if either operand is constant, src2 will be constant.
   ConditionCode ccode = static_cast<ConditionCode>(mir->dalvikInsn.arg[0]);
   if (rl_src1.is_const) {
-    RegLocation rl_temp = rl_src1;
-    rl_src1 = rl_src2;
-    rl_src2 = rl_temp;
+    std::swap(rl_src1, rl_src2);
     ccode = FlipComparisonOrder(ccode);
   }
   if (rl_src2.is_const) {
@@ -265,8 +243,8 @@ void ArmMir2Lir::GenFusedLongCmpBranch(BasicBlock* bb, MIR* mir) {
       return;
     }
   }
-  LIR* taken = &block_label_list_[bb->taken->id];
-  LIR* not_taken = &block_label_list_[bb->fall_through->id];
+  LIR* taken = &block_label_list_[bb->taken];
+  LIR* not_taken = &block_label_list_[bb->fall_through];
   rl_src1 = LoadValueWide(rl_src1, kCoreReg);
   rl_src2 = LoadValueWide(rl_src2, kCoreReg);
   OpRegReg(kOpCmp, rl_src1.high_reg, rl_src2.high_reg);
@@ -280,7 +258,7 @@ void ArmMir2Lir::GenFusedLongCmpBranch(BasicBlock* bb, MIR* mir) {
     case kCondLt:
       OpCondBranch(kCondLt, taken);
       OpCondBranch(kCondGt, not_taken);
-      ccode = kCondCc;
+      ccode = kCondUlt;
       break;
     case kCondLe:
       OpCondBranch(kCondLt, taken);
@@ -295,7 +273,7 @@ void ArmMir2Lir::GenFusedLongCmpBranch(BasicBlock* bb, MIR* mir) {
     case kCondGe:
       OpCondBranch(kCondGt, taken);
       OpCondBranch(kCondLt, not_taken);
-      ccode = kCondCs;
+      ccode = kCondUge;
       break;
     default:
       LOG(FATAL) << "Unexpected ccode: " << ccode;
@@ -311,23 +289,24 @@ void ArmMir2Lir::GenFusedLongCmpBranch(BasicBlock* bb, MIR* mir) {
 LIR* ArmMir2Lir::OpCmpImmBranch(ConditionCode cond, int reg, int check_value,
                                 LIR* target) {
   LIR* branch;
-  int mod_imm;
   ArmConditionCode arm_cond = ArmConditionEncoding(cond);
-  if ((ARM_LOWREG(reg)) && (check_value == 0) &&
+  /*
+   * A common use of OpCmpImmBranch is for null checks, and using the Thumb 16-bit
+   * compare-and-branch if zero is ideal if it will reach.  However, because null checks
+   * branch forward to a launch pad, they will frequently not reach - and thus have to
+   * be converted to a long form during assembly (which will trigger another assembly
+   * pass).  Here we estimate the branch distance for checks, and if large directly
+   * generate the long form in an attempt to avoid an extra assembly pass.
+   * TODO: consider interspersing launchpads in code following unconditional branches.
+   */
+  bool skip = ((target != NULL) && (target->opcode == kPseudoThrowTarget));
+  skip &= ((cu_->code_item->insns_size_in_code_units_ - current_dalvik_offset_) > 64);
+  if (!skip && (ARM_LOWREG(reg)) && (check_value == 0) &&
      ((arm_cond == kArmCondEq) || (arm_cond == kArmCondNe))) {
     branch = NewLIR2((arm_cond == kArmCondEq) ? kThumb2Cbz : kThumb2Cbnz,
                      reg, 0);
   } else {
-    mod_imm = ModifiedImmediate(check_value);
-    if (ARM_LOWREG(reg) && ((check_value & 0xff) == check_value)) {
-      NewLIR2(kThumbCmpRI8, reg, check_value);
-    } else if (mod_imm >= 0) {
-      NewLIR2(kThumb2CmpRI12, reg, mod_imm);
-    } else {
-      int t_reg = AllocTemp();
-      LoadConstant(t_reg, check_value);
-      OpRegReg(kOpCmp, reg, t_reg);
-    }
+    OpRegImm(kOpCmp, reg, check_value);
     branch = NewLIR2(kThumbBCond, 0, arm_cond);
   }
   branch->target = target;
@@ -467,14 +446,39 @@ LIR* ArmMir2Lir::GenRegMemCheck(ConditionCode c_code,
 
 RegLocation ArmMir2Lir::GenDivRemLit(RegLocation rl_dest, int reg1, int lit,
                                      bool is_div) {
-  LOG(FATAL) << "Unexpected use of GenDivRemLit for Arm";
-  return rl_dest;
+  RegLocation rl_result = EvalLoc(rl_dest, kCoreReg, true);
+
+  // Put the literal in a temp.
+  int lit_temp = AllocTemp();
+  LoadConstant(lit_temp, lit);
+  // Use the generic case for div/rem with arg2 in a register.
+  // TODO: The literal temp can be freed earlier during a modulus to reduce reg pressure.
+  rl_result = GenDivRem(rl_result, reg1, lit_temp, is_div);
+  FreeTemp(lit_temp);
+
+  return rl_result;
 }
 
 RegLocation ArmMir2Lir::GenDivRem(RegLocation rl_dest, int reg1, int reg2,
                                   bool is_div) {
-  LOG(FATAL) << "Unexpected use of GenDivRem for Arm";
-  return rl_dest;
+  RegLocation rl_result = EvalLoc(rl_dest, kCoreReg, true);
+  if (is_div) {
+    // Simple case, use sdiv instruction.
+    OpRegRegReg(kOpDiv, rl_result.low_reg, reg1, reg2);
+  } else {
+    // Remainder case, use the following code:
+    // temp = reg1 / reg2      - integer division
+    // temp = temp * reg2
+    // dest = reg1 - temp
+
+    int temp = AllocTemp();
+    OpRegRegReg(kOpDiv, temp, reg1, reg2);
+    OpRegReg(kOpMul, temp, reg2);
+    OpRegRegReg(kOpSub, rl_result.low_reg, reg1, temp);
+    FreeTemp(temp);
+  }
+
+  return rl_result;
 }
 
 bool ArmMir2Lir::GenInlinedMinMaxInt(CallInfo* info, bool is_min) {
@@ -494,6 +498,50 @@ bool ArmMir2Lir::GenInlinedMinMaxInt(CallInfo* info, bool is_min) {
   return true;
 }
 
+bool ArmMir2Lir::GenInlinedPeek(CallInfo* info, OpSize size) {
+  RegLocation rl_src_address = info->args[0];  // long address
+  rl_src_address.wide = 0;  // ignore high half in info->args[1]
+  RegLocation rl_dest = InlineTarget(info);
+  RegLocation rl_address = LoadValue(rl_src_address, kCoreReg);
+  RegLocation rl_result = EvalLoc(rl_dest, kCoreReg, true);
+  if (size == kLong) {
+    // Fake unaligned LDRD by two unaligned LDR instructions on ARMv7 with SCTLR.A set to 0.
+    if (rl_address.low_reg != rl_result.low_reg) {
+      LoadBaseDisp(rl_address.low_reg, 0, rl_result.low_reg, kWord, INVALID_SREG);
+      LoadBaseDisp(rl_address.low_reg, 4, rl_result.high_reg, kWord, INVALID_SREG);
+    } else {
+      LoadBaseDisp(rl_address.low_reg, 4, rl_result.high_reg, kWord, INVALID_SREG);
+      LoadBaseDisp(rl_address.low_reg, 0, rl_result.low_reg, kWord, INVALID_SREG);
+    }
+    StoreValueWide(rl_dest, rl_result);
+  } else {
+    DCHECK(size == kSignedByte || size == kSignedHalf || size == kWord);
+    // Unaligned load with LDR and LDRSH is allowed on ARMv7 with SCTLR.A set to 0.
+    LoadBaseDisp(rl_address.low_reg, 0, rl_result.low_reg, size, INVALID_SREG);
+    StoreValue(rl_dest, rl_result);
+  }
+  return true;
+}
+
+bool ArmMir2Lir::GenInlinedPoke(CallInfo* info, OpSize size) {
+  RegLocation rl_src_address = info->args[0];  // long address
+  rl_src_address.wide = 0;  // ignore high half in info->args[1]
+  RegLocation rl_src_value = info->args[2];  // [size] value
+  RegLocation rl_address = LoadValue(rl_src_address, kCoreReg);
+  if (size == kLong) {
+    // Fake unaligned STRD by two unaligned STR instructions on ARMv7 with SCTLR.A set to 0.
+    RegLocation rl_value = LoadValueWide(rl_src_value, kCoreReg);
+    StoreBaseDisp(rl_address.low_reg, 0, rl_value.low_reg, kWord);
+    StoreBaseDisp(rl_address.low_reg, 4, rl_value.high_reg, kWord);
+  } else {
+    DCHECK(size == kSignedByte || size == kSignedHalf || size == kWord);
+    // Unaligned store with STR and STRSH is allowed on ARMv7 with SCTLR.A set to 0.
+    RegLocation rl_value = LoadValue(rl_src_value, kCoreReg);
+    StoreBaseDisp(rl_address.low_reg, 0, rl_value.low_reg, size);
+  }
+  return true;
+}
+
 void ArmMir2Lir::OpLea(int rBase, int reg1, int reg2, int scale, int offset) {
   LOG(FATAL) << "Unexpected use of OpLea for Arm";
 }
@@ -502,31 +550,77 @@ void ArmMir2Lir::OpTlsCmp(ThreadOffset offset, int val) {
   LOG(FATAL) << "Unexpected use of OpTlsCmp for Arm";
 }
 
-bool ArmMir2Lir::GenInlinedCas32(CallInfo* info, bool need_write_barrier) {
+bool ArmMir2Lir::GenInlinedCas(CallInfo* info, bool is_long, bool is_object) {
   DCHECK_EQ(cu_->instruction_set, kThumb2);
   // Unused - RegLocation rl_src_unsafe = info->args[0];
-  RegLocation rl_src_obj= info->args[1];  // Object - known non-null
-  RegLocation rl_src_offset= info->args[2];  // long low
+  RegLocation rl_src_obj = info->args[1];  // Object - known non-null
+  RegLocation rl_src_offset = info->args[2];  // long low
   rl_src_offset.wide = 0;  // ignore high half in info->args[3]
-  RegLocation rl_src_expected= info->args[4];  // int or Object
-  RegLocation rl_src_new_value= info->args[5];  // int or Object
+  RegLocation rl_src_expected = info->args[4];  // int, long or Object
+  // If is_long, high half is in info->args[5]
+  RegLocation rl_src_new_value = info->args[is_long ? 6 : 5];  // int, long or Object
+  // If is_long, high half is in info->args[7]
   RegLocation rl_dest = InlineTarget(info);  // boolean place for result
 
+  // We have only 5 temporary registers available and actually only 4 if the InlineTarget
+  // above locked one of the temps. For a straightforward CAS64 we need 7 registers:
+  // r_ptr (1), new_value (2), expected(2) and ldrexd result (2). If neither expected nor
+  // new_value is in a non-temp core register we shall reload them in the ldrex/strex loop
+  // into the same temps, reducing the number of required temps down to 5. We shall work
+  // around the potentially locked temp by using LR for r_ptr, unconditionally.
+  // TODO: Pass information about the need for more temps to the stack frame generation
+  // code so that we can rely on being able to allocate enough temps.
+  DCHECK(!reg_pool_->core_regs[rARM_LR].is_temp);
+  MarkTemp(rARM_LR);
+  FreeTemp(rARM_LR);
+  LockTemp(rARM_LR);
+  bool load_early = true;
+  if (is_long) {
+    bool expected_is_core_reg =
+        rl_src_expected.location == kLocPhysReg && !IsFpReg(rl_src_expected.low_reg);
+    bool new_value_is_core_reg =
+        rl_src_new_value.location == kLocPhysReg && !IsFpReg(rl_src_new_value.low_reg);
+    bool expected_is_good_reg = expected_is_core_reg && !IsTemp(rl_src_expected.low_reg);
+    bool new_value_is_good_reg = new_value_is_core_reg && !IsTemp(rl_src_new_value.low_reg);
+
+    if (!expected_is_good_reg && !new_value_is_good_reg) {
+      // None of expected/new_value is non-temp reg, need to load both late
+      load_early = false;
+      // Make sure they are not in the temp regs and the load will not be skipped.
+      if (expected_is_core_reg) {
+        FlushRegWide(rl_src_expected.low_reg, rl_src_expected.high_reg);
+        ClobberSReg(rl_src_expected.s_reg_low);
+        ClobberSReg(GetSRegHi(rl_src_expected.s_reg_low));
+        rl_src_expected.location = kLocDalvikFrame;
+      }
+      if (new_value_is_core_reg) {
+        FlushRegWide(rl_src_new_value.low_reg, rl_src_new_value.high_reg);
+        ClobberSReg(rl_src_new_value.s_reg_low);
+        ClobberSReg(GetSRegHi(rl_src_new_value.s_reg_low));
+        rl_src_new_value.location = kLocDalvikFrame;
+      }
+    }
+  }
 
   // Release store semantics, get the barrier out of the way.  TODO: revisit
   GenMemBarrier(kStoreLoad);
 
   RegLocation rl_object = LoadValue(rl_src_obj, kCoreReg);
-  RegLocation rl_new_value = LoadValue(rl_src_new_value, kCoreReg);
+  RegLocation rl_new_value;
+  if (!is_long) {
+    rl_new_value = LoadValue(rl_src_new_value, kCoreReg);
+  } else if (load_early) {
+    rl_new_value = LoadValueWide(rl_src_new_value, kCoreReg);
+  }
 
-  if (need_write_barrier && !mir_graph_->IsConstantNullRef(rl_new_value)) {
+  if (is_object && !mir_graph_->IsConstantNullRef(rl_new_value)) {
     // Mark card for object assuming new value is stored.
     MarkGCCard(rl_new_value.low_reg, rl_object.low_reg);
   }
 
   RegLocation rl_offset = LoadValue(rl_src_offset, kCoreReg);
 
-  int r_ptr = AllocTemp();
+  int r_ptr = rARM_LR;
   OpRegRegReg(kOpAdd, r_ptr, rl_object.low_reg, rl_offset.low_reg);
 
   // Free now unneeded rl_object and rl_offset to give more temps.
@@ -535,29 +629,77 @@ bool ArmMir2Lir::GenInlinedCas32(CallInfo* info, bool need_write_barrier) {
   ClobberSReg(rl_offset.s_reg_low);
   FreeTemp(rl_offset.low_reg);
 
-  RegLocation rl_result = EvalLoc(rl_dest, kCoreReg, true);
-  LoadConstant(rl_result.low_reg, 0);  // r_result := 0
+  RegLocation rl_expected;
+  if (!is_long) {
+    rl_expected = LoadValue(rl_src_expected, kCoreReg);
+  } else if (load_early) {
+    rl_expected = LoadValueWide(rl_src_expected, kCoreReg);
+  } else {
+    rl_new_value.low_reg = rl_expected.low_reg = AllocTemp();
+    rl_new_value.high_reg = rl_expected.high_reg = AllocTemp();
+  }
 
-  // while ([r_ptr] == rExpected && r_result == 0) {
-  //   [r_ptr] <- r_new_value && r_result := success ? 0 : 1
-  //   r_result ^= 1
-  // }
-  int r_old_value = AllocTemp();
+  // do {
+  //   tmp = [r_ptr] - expected;
+  // } while (tmp == 0 && failure([r_ptr] <- r_new_value));
+  // result = tmp != 0;
+
+  int r_tmp = AllocTemp();
   LIR* target = NewLIR0(kPseudoTargetLabel);
-  NewLIR3(kThumb2Ldrex, r_old_value, r_ptr, 0);
 
-  RegLocation rl_expected = LoadValue(rl_src_expected, kCoreReg);
-  OpRegReg(kOpCmp, r_old_value, rl_expected.low_reg);
-  FreeTemp(r_old_value);  // Now unneeded.
-  OpIT(kCondEq, "TT");
-  NewLIR4(kThumb2Strex /* eq */, rl_result.low_reg, rl_new_value.low_reg, r_ptr, 0);
-  FreeTemp(r_ptr);  // Now unneeded.
-  OpRegImm(kOpXor /* eq */, rl_result.low_reg, 1);
-  OpRegImm(kOpCmp /* eq */, rl_result.low_reg, 0);
+  if (is_long) {
+    int r_tmp_high = AllocTemp();
+    if (!load_early) {
+      LoadValueDirectWide(rl_src_expected, rl_expected.low_reg, rl_expected.high_reg);
+    }
+    NewLIR3(kThumb2Ldrexd, r_tmp, r_tmp_high, r_ptr);
+    OpRegReg(kOpSub, r_tmp, rl_expected.low_reg);
+    OpRegReg(kOpSub, r_tmp_high, rl_expected.high_reg);
+    if (!load_early) {
+      LoadValueDirectWide(rl_src_new_value, rl_new_value.low_reg, rl_new_value.high_reg);
+    }
+    // Make sure we use ORR that sets the ccode
+    if (ARM_LOWREG(r_tmp) && ARM_LOWREG(r_tmp_high)) {
+      NewLIR2(kThumbOrr, r_tmp, r_tmp_high);
+    } else {
+      NewLIR4(kThumb2OrrRRRs, r_tmp, r_tmp, r_tmp_high, 0);
+    }
+    FreeTemp(r_tmp_high);  // Now unneeded
+
+    DCHECK(last_lir_insn_->u.m.def_mask & ENCODE_CCODE);
+    OpIT(kCondEq, "T");
+    NewLIR4(kThumb2Strexd /* eq */, r_tmp, rl_new_value.low_reg, rl_new_value.high_reg, r_ptr);
+
+  } else {
+    NewLIR3(kThumb2Ldrex, r_tmp, r_ptr, 0);
+    OpRegReg(kOpSub, r_tmp, rl_expected.low_reg);
+    DCHECK(last_lir_insn_->u.m.def_mask & ENCODE_CCODE);
+    OpIT(kCondEq, "T");
+    NewLIR4(kThumb2Strex /* eq */, r_tmp, rl_new_value.low_reg, r_ptr, 0);
+  }
+
+  // Still one conditional left from OpIT(kCondEq, "T") from either branch
+  OpRegImm(kOpCmp /* eq */, r_tmp, 1);
   OpCondBranch(kCondEq, target);
+
+  if (!load_early) {
+    FreeTemp(rl_expected.low_reg);  // Now unneeded.
+    FreeTemp(rl_expected.high_reg);  // Now unneeded.
+  }
+
+  // result := (tmp1 != 0) ? 0 : 1;
+  RegLocation rl_result = EvalLoc(rl_dest, kCoreReg, true);
+  OpRegRegImm(kOpRsub, rl_result.low_reg, r_tmp, 1);
+  DCHECK(last_lir_insn_->u.m.def_mask & ENCODE_CCODE);
+  OpIT(kCondUlt, "");
+  LoadConstant(rl_result.low_reg, 0); /* cc */
+  FreeTemp(r_tmp);  // Now unneeded.
 
   StoreValue(rl_dest, rl_result);
 
+  // Now, restore lr to its non-temp status.
+  Clobber(rARM_LR);
+  UnmarkTemp(rARM_LR);
   return true;
 }
 
@@ -608,17 +750,17 @@ void ArmMir2Lir::GenMemBarrier(MemBarrierKind barrier_kind) {
   int dmb_flavor;
   // TODO: revisit Arm barrier kinds
   switch (barrier_kind) {
-    case kLoadStore: dmb_flavor = kSY; break;
-    case kLoadLoad: dmb_flavor = kSY; break;
-    case kStoreStore: dmb_flavor = kST; break;
-    case kStoreLoad: dmb_flavor = kSY; break;
+    case kLoadStore: dmb_flavor = kISH; break;
+    case kLoadLoad: dmb_flavor = kISH; break;
+    case kStoreStore: dmb_flavor = kISHST; break;
+    case kStoreLoad: dmb_flavor = kISH; break;
     default:
       LOG(FATAL) << "Unexpected MemBarrierKind: " << barrier_kind;
       dmb_flavor = kSY;  // quiet gcc.
       break;
   }
   LIR* dmb = NewLIR1(kThumb2Dmb, dmb_flavor);
-  dmb->def_mask = ENCODE_ALL;
+  dmb->u.m.def_mask = ENCODE_ALL;
 #endif
 }
 
@@ -755,7 +897,7 @@ void ArmMir2Lir::GenXorLong(RegLocation rl_dest, RegLocation rl_src1,
  * Generate array load
  */
 void ArmMir2Lir::GenArrayGet(int opt_flags, OpSize size, RegLocation rl_array,
-                          RegLocation rl_index, RegLocation rl_dest, int scale) {
+                             RegLocation rl_index, RegLocation rl_dest, int scale) {
   RegisterClass reg_class = oat_reg_class_by_size(size);
   int len_offset = mirror::Array::LengthOffset().Int32Value();
   int data_offset;
@@ -829,9 +971,7 @@ void ArmMir2Lir::GenArrayGet(int opt_flags, OpSize size, RegLocation rl_array,
     rl_result = EvalLoc(rl_dest, reg_class, true);
 
     if (needs_range_check) {
-      // TODO: change kCondCS to a more meaningful name, is the sense of
-      // carry-set/clear flipped?
-      GenRegRegCheck(kCondCs, rl_index.low_reg, reg_len, kThrowArrayBounds);
+      GenRegRegCheck(kCondUge, rl_index.low_reg, reg_len, kThrowArrayBounds);
       FreeTemp(reg_len);
     }
     LoadBaseIndexed(reg_ptr, rl_index.low_reg, rl_result.low_reg, scale, size);
@@ -845,13 +985,13 @@ void ArmMir2Lir::GenArrayGet(int opt_flags, OpSize size, RegLocation rl_array,
  *
  */
 void ArmMir2Lir::GenArrayPut(int opt_flags, OpSize size, RegLocation rl_array,
-                          RegLocation rl_index, RegLocation rl_src, int scale) {
+                             RegLocation rl_index, RegLocation rl_src, int scale, bool card_mark) {
   RegisterClass reg_class = oat_reg_class_by_size(size);
   int len_offset = mirror::Array::LengthOffset().Int32Value();
-  int data_offset;
   bool constant_index = rl_index.is_const;
 
-  if (rl_src.wide) {
+  int data_offset;
+  if (size == kLong || size == kDouble) {
     data_offset = mirror::Array::DataOffset(sizeof(int64_t)).Int32Value();
   } else {
     data_offset = mirror::Array::DataOffset(sizeof(int32_t)).Int32Value();
@@ -868,12 +1008,14 @@ void ArmMir2Lir::GenArrayPut(int opt_flags, OpSize size, RegLocation rl_array,
   }
 
   int reg_ptr;
+  bool allocated_reg_ptr_temp = false;
   if (constant_index) {
     reg_ptr = rl_array.low_reg;
-  } else if (IsTemp(rl_array.low_reg)) {
+  } else if (IsTemp(rl_array.low_reg) && !card_mark) {
     Clobber(rl_array.low_reg);
     reg_ptr = rl_array.low_reg;
   } else {
+    allocated_reg_ptr_temp = true;
     reg_ptr = AllocTemp();
   }
 
@@ -918,76 +1060,20 @@ void ArmMir2Lir::GenArrayPut(int opt_flags, OpSize size, RegLocation rl_array,
     OpRegRegImm(kOpAdd, reg_ptr, rl_array.low_reg, data_offset);
     rl_src = LoadValue(rl_src, reg_class);
     if (needs_range_check) {
-      GenRegRegCheck(kCondCs, rl_index.low_reg, reg_len, kThrowArrayBounds);
+      GenRegRegCheck(kCondUge, rl_index.low_reg, reg_len, kThrowArrayBounds);
       FreeTemp(reg_len);
     }
     StoreBaseIndexed(reg_ptr, rl_index.low_reg, rl_src.low_reg,
                      scale, size);
   }
-  if (!constant_index) {
+  if (allocated_reg_ptr_temp) {
     FreeTemp(reg_ptr);
   }
-}
-
-/*
- * Generate array store
- *
- */
-void ArmMir2Lir::GenArrayObjPut(int opt_flags, RegLocation rl_array,
-                             RegLocation rl_index, RegLocation rl_src, int scale) {
-  int len_offset = mirror::Array::LengthOffset().Int32Value();
-  int data_offset = mirror::Array::DataOffset(sizeof(mirror::Object*)).Int32Value();
-
-  FlushAllRegs();  // Use explicit registers
-  LockCallTemps();
-
-  int r_value = TargetReg(kArg0);  // Register holding value
-  int r_array_class = TargetReg(kArg1);  // Register holding array's Class
-  int r_array = TargetReg(kArg2);  // Register holding array
-  int r_index = TargetReg(kArg3);  // Register holding index into array
-
-  LoadValueDirectFixed(rl_array, r_array);  // Grab array
-  LoadValueDirectFixed(rl_src, r_value);  // Grab value
-  LoadValueDirectFixed(rl_index, r_index);  // Grab index
-
-  GenNullCheck(rl_array.s_reg_low, r_array, opt_flags);  // NPE?
-
-  // Store of null?
-  LIR* null_value_check = OpCmpImmBranch(kCondEq, r_value, 0, NULL);
-
-  // Get the array's class.
-  LoadWordDisp(r_array, mirror::Object::ClassOffset().Int32Value(), r_array_class);
-  CallRuntimeHelperRegReg(QUICK_ENTRYPOINT_OFFSET(pCanPutArrayElement), r_value,
-                          r_array_class, true);
-  // Redo LoadValues in case they didn't survive the call.
-  LoadValueDirectFixed(rl_array, r_array);  // Reload array
-  LoadValueDirectFixed(rl_index, r_index);  // Reload index
-  LoadValueDirectFixed(rl_src, r_value);  // Reload value
-  r_array_class = INVALID_REG;
-
-  // Branch here if value to be stored == null
-  LIR* target = NewLIR0(kPseudoTargetLabel);
-  null_value_check->target = target;
-
-  bool needs_range_check = (!(opt_flags & MIR_IGNORE_RANGE_CHECK));
-  int reg_len = INVALID_REG;
-  if (needs_range_check) {
-    reg_len = TargetReg(kArg1);
-    LoadWordDisp(r_array, len_offset, reg_len);  // Get len
-  }
-  /* r_ptr -> array data */
-  int r_ptr = AllocTemp();
-  OpRegRegImm(kOpAdd, r_ptr, r_array, data_offset);
-  if (needs_range_check) {
-    GenRegRegCheck(kCondCs, r_index, reg_len, kThrowArrayBounds);
-  }
-  StoreBaseIndexed(r_ptr, r_index, r_value, scale, kWord);
-  FreeTemp(r_ptr);
-  FreeTemp(r_index);
-  if (!mir_graph_->IsConstantNullRef(rl_src)) {
-    MarkGCCard(r_value, r_array);
+  if (card_mark) {
+    MarkGCCard(rl_src.low_reg, rl_array.low_reg);
   }
 }
+
 
 void ArmMir2Lir::GenShiftImmOpLong(Instruction::Code opcode,
                                    RegLocation rl_dest, RegLocation rl_src, RegLocation rl_shift) {
@@ -1074,9 +1160,7 @@ void ArmMir2Lir::GenArithImmOpLong(Instruction::Code opcode,
     // Normalize
     if (!rl_src2.is_const) {
       DCHECK(rl_src1.is_const);
-      RegLocation rl_temp = rl_src1;
-      rl_src1 = rl_src2;
-      rl_src2 = rl_temp;
+      std::swap(rl_src1, rl_src2);
     }
   }
   if (BadOverlap(rl_src1, rl_dest)) {
@@ -1110,8 +1194,8 @@ void ArmMir2Lir::GenArithImmOpLong(Instruction::Code opcode,
   switch (opcode) {
     case Instruction::ADD_LONG:
     case Instruction::ADD_LONG_2ADDR:
-      NewLIR3(kThumb2AddRRI8, rl_result.low_reg, rl_src1.low_reg, mod_imm_lo);
-      NewLIR3(kThumb2AdcRRI8, rl_result.high_reg, rl_src1.high_reg, mod_imm_hi);
+      NewLIR3(kThumb2AddRRI8M, rl_result.low_reg, rl_src1.low_reg, mod_imm_lo);
+      NewLIR3(kThumb2AdcRRI8M, rl_result.high_reg, rl_src1.high_reg, mod_imm_hi);
       break;
     case Instruction::OR_LONG:
     case Instruction::OR_LONG_2ADDR:
@@ -1138,8 +1222,8 @@ void ArmMir2Lir::GenArithImmOpLong(Instruction::Code opcode,
       break;
     case Instruction::SUB_LONG_2ADDR:
     case Instruction::SUB_LONG:
-      NewLIR3(kThumb2SubRRI8, rl_result.low_reg, rl_src1.low_reg, mod_imm_lo);
-      NewLIR3(kThumb2SbcRRI8, rl_result.high_reg, rl_src1.high_reg, mod_imm_hi);
+      NewLIR3(kThumb2SubRRI8M, rl_result.low_reg, rl_src1.low_reg, mod_imm_lo);
+      NewLIR3(kThumb2SbcRRI8M, rl_result.high_reg, rl_src1.high_reg, mod_imm_hi);
       break;
     default:
       LOG(FATAL) << "Unexpected opcode " << opcode;

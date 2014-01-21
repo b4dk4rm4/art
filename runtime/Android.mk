@@ -21,6 +21,8 @@ include art/build/Android.common.mk
 LIBART_COMMON_SRC_FILES := \
 	atomic.cc.arm \
 	barrier.cc \
+	base/allocator.cc \
+	base/bit_vector.cc \
 	base/logging.cc \
 	base/mutex.cc \
 	base/stringpiece.cc \
@@ -32,18 +34,17 @@ LIBART_COMMON_SRC_FILES := \
 	base/unix_file/random_access_file_utils.cc \
 	base/unix_file/string_file.cc \
 	check_jni.cc \
+	catch_block_stack_visitor.cc \
+	catch_finder.cc \
 	class_linker.cc \
 	common_throws.cc \
 	debugger.cc \
 	dex_file.cc \
 	dex_file_verifier.cc \
 	dex_instruction.cc \
-	disassembler.cc \
-	disassembler_arm.cc \
-	disassembler_mips.cc \
-	disassembler_x86.cc \
 	elf_file.cc \
 	gc/allocator/dlmalloc.cc \
+	gc/allocator/rosalloc.cc \
 	gc/accounting/card_table.cc \
 	gc/accounting/gc_allocator.cc \
 	gc/accounting/heap_bitmap.cc \
@@ -52,11 +53,17 @@ LIBART_COMMON_SRC_FILES := \
 	gc/collector/garbage_collector.cc \
 	gc/collector/mark_sweep.cc \
 	gc/collector/partial_mark_sweep.cc \
+	gc/collector/semi_space.cc \
 	gc/collector/sticky_mark_sweep.cc \
+	gc/gc_cause.cc \
 	gc/heap.cc \
+	gc/reference_queue.cc \
+	gc/space/bump_pointer_space.cc \
 	gc/space/dlmalloc_space.cc \
 	gc/space/image_space.cc \
 	gc/space/large_object_space.cc \
+	gc/space/malloc_space.cc \
+	gc/space/rosalloc_space.cc \
 	gc/space/space.cc \
 	hprof/hprof.cc \
 	image.cc \
@@ -64,6 +71,9 @@ LIBART_COMMON_SRC_FILES := \
 	instrumentation.cc \
 	intern_table.cc \
 	interpreter/interpreter.cc \
+	interpreter/interpreter_common.cc \
+	interpreter/interpreter_goto_table_impl.cc \
+	interpreter/interpreter_switch_impl.cc \
 	jdwp/jdwp_event.cc \
 	jdwp/jdwp_expand_buf.cc \
 	jdwp/jdwp_handler.cc \
@@ -124,6 +134,7 @@ LIBART_COMMON_SRC_FILES := \
 	thread_pool.cc \
 	throw_location.cc \
 	trace.cc \
+	profiler.cc \
 	utf.cc \
 	utils.cc \
 	verifier/dex_gc_map.cc \
@@ -140,6 +151,7 @@ LIBART_COMMON_SRC_FILES += \
 	arch/arm/registers_arm.cc \
 	arch/x86/registers_x86.cc \
 	arch/mips/registers_mips.cc \
+	arch/quick_alloc_entrypoints.cc \
 	entrypoints/entrypoint_utils.cc \
 	entrypoints/interpreter/interpreter_entrypoints.cc \
 	entrypoints/jni/jni_entrypoints.cc \
@@ -178,6 +190,7 @@ LIBART_TARGET_SRC_FILES := \
 	runtime_android.cc \
 	thread_android.cc
 
+LIBART_LDFLAGS :=
 ifeq ($(TARGET_ARCH),arm)
 LIBART_TARGET_SRC_FILES += \
 	arch/arm/context_arm.cc.arm \
@@ -185,6 +198,7 @@ LIBART_TARGET_SRC_FILES += \
 	arch/arm/jni_entrypoints_arm.S \
 	arch/arm/portable_entrypoints_arm.S \
 	arch/arm/quick_entrypoints_arm.S \
+	arch/arm/arm_sdiv.S \
 	arch/arm/thread_arm.cc
 else # TARGET_ARCH != arm
 ifeq ($(TARGET_ARCH),x86)
@@ -195,7 +209,18 @@ LIBART_TARGET_SRC_FILES += \
 	arch/x86/portable_entrypoints_x86.S \
 	arch/x86/quick_entrypoints_x86.S \
 	arch/x86/thread_x86.cc
+LIBART_LDFLAGS += -Wl,--no-fatal-warnings
 else # TARGET_ARCH != x86
+ifeq ($(TARGET_ARCH),x86_64)
+LIBART_TARGET_SRC_FILES += \
+	arch/x86/context_x86.cc \
+	arch/x86/entrypoints_init_x86.cc \
+	arch/x86/jni_entrypoints_x86.S \
+	arch/x86/portable_entrypoints_x86.S \
+	arch/x86/quick_entrypoints_x86.S \
+	arch/x86/thread_x86.cc
+LIBART_LDFLAGS += -Wl,--no-fatal-warnings
+else # TARGET_ARCH != x86_64
 ifeq ($(TARGET_ARCH),mips)
 LIBART_TARGET_SRC_FILES += \
 	arch/mips/context_mips.cc \
@@ -205,9 +230,14 @@ LIBART_TARGET_SRC_FILES += \
 	arch/mips/quick_entrypoints_mips.S \
 	arch/mips/thread_mips.cc
 else # TARGET_ARCH != mips
+ifeq ($(TARGET_ARCH),aarch64)
+$(info TODOAArch64: $(LOCAL_PATH)/Android.mk Add AArch64 specific runtime files)
+else
 $(error unsupported TARGET_ARCH=$(TARGET_ARCH))
+endif # TARGET_ARCH != aarch64
 endif # TARGET_ARCH != mips
 endif # TARGET_ARCH != x86
+endif # TARGET_ARCH != x86_64
 endif # TARGET_ARCH != arm
 
 
@@ -244,7 +274,9 @@ LIBART_ENUM_OPERATOR_OUT_HEADER_FILES := \
 	jdwp/jdwp.h \
 	jdwp/jdwp_constants.h \
 	locks.h \
+	lock_word.h \
 	mirror/class.h \
+	oat.h \
 	thread.h \
 	thread_state.h \
 	verifier/method_verifier.h
@@ -304,6 +336,7 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
   LOCAL_GENERATED_SOURCES += $$(ENUM_OPERATOR_OUT_GEN)
 
   LOCAL_CFLAGS := $(LIBART_CFLAGS)
+  LOCAL_LDFLAGS := $(LIBART_LDFLAGS)
   ifeq ($$(art_target_or_host),target)
     LOCAL_CLANG := $(ART_TARGET_CLANG)
     LOCAL_CFLAGS += $(ART_TARGET_CFLAGS)
@@ -331,12 +364,12 @@ $$(ENUM_OPERATOR_OUT_GEN): $$(GENERATED_SRC_DIR)/%_operator_out.cc : $(LOCAL_PAT
   endif
   LOCAL_C_INCLUDES += $(ART_C_INCLUDES)
   LOCAL_SHARED_LIBRARIES += liblog libnativehelper
-  LOCAL_SHARED_LIBRARIES += libcorkscrew # native stack trace support
+  LOCAL_SHARED_LIBRARIES += libbacktrace # native stack trace support
   ifeq ($$(art_target_or_host),target)
-    LOCAL_SHARED_LIBRARIES += libcutils libz libdl libselinux
+    LOCAL_SHARED_LIBRARIES += libcutils libdl libselinux libutils
+    LOCAL_STATIC_LIBRARIES := libziparchive libz
   else # host
-    LOCAL_STATIC_LIBRARIES += libcutils
-    LOCAL_SHARED_LIBRARIES += libz-host
+    LOCAL_STATIC_LIBRARIES += libcutils libziparchive-host libz libutils
     LOCAL_LDLIBS += -ldl -lpthread
     ifeq ($(HOST_OS),linux)
       LOCAL_LDLIBS += -lrt

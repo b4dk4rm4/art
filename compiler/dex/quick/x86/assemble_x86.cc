@@ -177,6 +177,8 @@ ENCODING_MAP(Cmp, IS_LOAD, 0, 0,
 
   { kX86Lea32RA, kRegArray, IS_QUIN_OP | REG_DEF0_USE12, { 0, 0, 0x8D, 0, 0, 0, 0, 0 }, "Lea32RA", "!0r,[!1r+!2r<<!3d+!4d]" },
 
+  { kX86Cmov32RRC, kRegRegCond, IS_TERTIARY_OP | REG_DEF0_USE01 | USES_CCODES, {0, 0, 0x0F, 0x40, 0, 0, 0, 0}, "Cmovcc32RR", "!2c !0r,!1r" },
+
 #define SHIFT_ENCODING_MAP(opname, modrm_opcode) \
 { kX86 ## opname ## 8RI, kShiftRegImm,                        IS_BINARY_OP   | REG_DEF0_USE0 |            SETS_CCODES, { 0,    0, 0xC0, 0, 0, modrm_opcode, 0xD1, 1 }, #opname "8RI", "!0r,!1d" }, \
 { kX86 ## opname ## 8MI, kShiftMemImm,   IS_LOAD | IS_STORE | IS_TERTIARY_OP | REG_USE0      |            SETS_CCODES, { 0,    0, 0xC0, 0, 0, modrm_opcode, 0xD1, 1 }, #opname "8MI", "[!0r+!1d],!2d" }, \
@@ -246,6 +248,10 @@ ENCODING_MAP(Cmp, IS_LOAD, 0, 0,
   UNARY_ENCODING_MAP(Idivmod, 0x7, 0, SETS_CCODES, DaR, kRegRegReg, IS_UNARY_OP | REG_USE0, DaM, kRegRegMem, IS_BINARY_OP | REG_USE0, DaA, kRegRegArray, IS_QUAD_OP | REG_USE01, 0, REG_DEFA_USEA, REG_DEFAD_USEAD, REG_DEFAD_USEAD, "ah:al,ax,", "dx:ax,dx:ax,", "edx:eax,edx:eax,"),
 #undef UNARY_ENCODING_MAP
 
+  { kX86Bswap32R, kRegOpcode, IS_UNARY_OP | REG_DEF0_USE0,                                 { 0, 0, 0x0F, 0xC8, 0, 0, 0, 0 }, "Bswap32R", "!0r" },
+  { kX86Push32R,  kRegOpcode, IS_UNARY_OP | REG_USE0 | REG_USE_SP | REG_DEF_SP | IS_STORE, { 0, 0, 0x50, 0,    0, 0, 0, 0 }, "Push32R",  "!0r" },
+  { kX86Pop32R,   kRegOpcode, IS_UNARY_OP | REG_DEF0 | REG_USE_SP | REG_DEF_SP | IS_LOAD,  { 0, 0, 0x58, 0,    0, 0, 0, 0 }, "Pop32R",   "!0r" },
+
 #define EXT_0F_ENCODING_MAP(opname, prefix, opcode, reg_def) \
 { kX86 ## opname ## RR, kRegReg,             IS_BINARY_OP   | reg_def | REG_USE01,  { prefix, 0, 0x0F, opcode, 0, 0, 0, 0 }, #opname "RR", "!0r,!1r" }, \
 { kX86 ## opname ## RM, kRegMem,   IS_LOAD | IS_TERTIARY_OP | reg_def | REG_USE01,  { prefix, 0, 0x0F, opcode, 0, 0, 0, 0 }, #opname "RM", "!0r,[!1r+!2d]" }, \
@@ -284,6 +290,8 @@ ENCODING_MAP(Cmp, IS_LOAD, 0, 0,
 
   { kX86PsrlqRI, kRegImm, IS_BINARY_OP | REG_DEF0_USE0, { 0x66, 0, 0x0F, 0x73, 0, 2, 0, 1 }, "PsrlqRI", "!0r,!1d" },
   { kX86PsllqRI, kRegImm, IS_BINARY_OP | REG_DEF0_USE0, { 0x66, 0, 0x0F, 0x73, 0, 6, 0, 1 }, "PsllqRI", "!0r,!1d" },
+  { kX86SqrtsdRR, kRegReg, IS_BINARY_OP | REG_DEF0_USE1, { 0xF2, 0, 0x0F, 0x51, 0, 0, 0, 0 }, "SqrtsdRR", "!0r,!1r" },
+  { kX86FstpdM, kMem, IS_STORE | IS_BINARY_OP | REG_USE0, { 0x0, 0, 0xDD, 0x00, 0, 3, 0, 0 }, "FstpdM", "[!0r,!1d]" },
 
   EXT_0F_ENCODING_MAP(Movdxr,    0x66, 0x6E, REG_DEF0),
   { kX86MovdrxRR, kRegRegStore, IS_BINARY_OP | REG_DEF0   | REG_USE01,  { 0x66, 0, 0x0F, 0x7E, 0, 0, 0, 0 }, "MovdrxRR", "!0r,!1r" },
@@ -304,9 +312,10 @@ ENCODING_MAP(Cmp, IS_LOAD, 0, 0,
   { kX86CmpxchgRR, kRegRegStore, IS_BINARY_OP | REG_DEF0 | REG_USE01 | REG_DEFA_USEA | SETS_CCODES, { 0, 0, 0x0F, 0xB1, 0, 0, 0, 0 }, "Cmpxchg", "!0r,!1r" },
   { kX86CmpxchgMR, kMemReg,   IS_STORE | IS_TERTIARY_OP | REG_USE02 | REG_DEFA_USEA | SETS_CCODES, { 0, 0, 0x0F, 0xB1, 0, 0, 0, 0 }, "Cmpxchg", "[!0r+!1d],!2r" },
   { kX86CmpxchgAR, kArrayReg, IS_STORE | IS_QUIN_OP | REG_USE014 | REG_DEFA_USEA | SETS_CCODES, { 0, 0, 0x0F, 0xB1, 0, 0, 0, 0 }, "Cmpxchg", "[!0r+!1r<<!2d+!3d],!4r" },
-  { kX86LockCmpxchgRR, kRegRegStore, IS_BINARY_OP | REG_DEF0 | REG_USE01 | REG_DEFA_USEA | SETS_CCODES, { 0xF0, 0, 0x0F, 0xB1, 0, 0, 0, 0 }, "Lock Cmpxchg", "!0r,!1r" },
   { kX86LockCmpxchgMR, kMemReg,   IS_STORE | IS_TERTIARY_OP | REG_USE02 | REG_DEFA_USEA | SETS_CCODES, { 0xF0, 0, 0x0F, 0xB1, 0, 0, 0, 0 }, "Lock Cmpxchg", "[!0r+!1d],!2r" },
   { kX86LockCmpxchgAR, kArrayReg, IS_STORE | IS_QUIN_OP | REG_USE014 | REG_DEFA_USEA | SETS_CCODES, { 0xF0, 0, 0x0F, 0xB1, 0, 0, 0, 0 }, "Lock Cmpxchg", "[!0r+!1r<<!2d+!3d],!4r" },
+  { kX86LockCmpxchg8bM, kMem,   IS_STORE | IS_BINARY_OP | REG_USE0 | REG_DEFAD_USEAD | REG_USEC | REG_USEB | SETS_CCODES, { 0xF0, 0, 0x0F, 0xC7, 0, 1, 0, 0 }, "Lock Cmpxchg8b", "[!0r+!1d]" },
+  { kX86LockCmpxchg8bA, kArray, IS_STORE | IS_QUAD_OP | REG_USE01 | REG_DEFAD_USEAD | REG_USEC | REG_USEB | SETS_CCODES, { 0xF0, 0, 0x0F, 0xC7, 0, 1, 0, 0 }, "Lock Cmpxchg8b", "[!0r+!1r<<!2d+!3d]" },
 
   EXT_0F_ENCODING_MAP(Movzx8,  0x00, 0xB6, REG_DEF0),
   EXT_0F_ENCODING_MAP(Movzx16, 0x00, 0xB7, REG_DEF0),
@@ -362,6 +371,7 @@ static size_t ComputeSize(const X86EncodingMap* entry, int base, int displacemen
 }
 
 int X86Mir2Lir::GetInsnSize(LIR* lir) {
+  DCHECK(!IsPseudoLirOp(lir->opcode));
   const X86EncodingMap* entry = &X86Mir2Lir::EncodingMap[lir->opcode];
   switch (entry->kind) {
     case kData:
@@ -370,6 +380,8 @@ int X86Mir2Lir::GetInsnSize(LIR* lir) {
       return lir->operands[0];  // length of nop is sole operand
     case kNullary:
       return 1;  // 1 byte of opcode
+    case kRegOpcode:  // lir operands - 0: reg
+      return ComputeSize(entry, 0, 0, false) - 1;  // substract 1 for modrm
     case kReg:  // lir operands - 0: reg
       return ComputeSize(entry, 0, 0, false);
     case kMem:  // lir operands - 0: base, 1: disp
@@ -439,6 +451,8 @@ int X86Mir2Lir::GetInsnSize(LIR* lir) {
       return ComputeSize(entry, lir->operands[0], lir->operands[1], false);
     case kArrayCond:  // lir operands - 0: base, 1: index, 2: scale, 3: disp, 4: cond
       return ComputeSize(entry, lir->operands[0], lir->operands[3], true);
+    case kRegRegCond:  // lir operands - 0: reg, 1: reg, 2: cond
+      return ComputeSize(entry, 0, 0, false);
     case kJcc:
       if (lir->opcode == kX86Jcc8) {
         return 2;  // opcode + rel8
@@ -488,6 +502,37 @@ int X86Mir2Lir::GetInsnSize(LIR* lir) {
   return 0;
 }
 
+void X86Mir2Lir::EmitPrefix(const X86EncodingMap* entry) {
+  if (entry->skeleton.prefix1 != 0) {
+    code_buffer_.push_back(entry->skeleton.prefix1);
+    if (entry->skeleton.prefix2 != 0) {
+      code_buffer_.push_back(entry->skeleton.prefix2);
+    }
+  } else {
+    DCHECK_EQ(0, entry->skeleton.prefix2);
+  }
+}
+
+void X86Mir2Lir::EmitOpcode(const X86EncodingMap* entry) {
+  code_buffer_.push_back(entry->skeleton.opcode);
+  if (entry->skeleton.opcode == 0x0F) {
+    code_buffer_.push_back(entry->skeleton.extra_opcode1);
+    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode1 == 0x3A) {
+      code_buffer_.push_back(entry->skeleton.extra_opcode2);
+    } else {
+      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
+    }
+  } else {
+    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
+    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
+  }
+}
+
+void X86Mir2Lir::EmitPrefixAndOpcode(const X86EncodingMap* entry) {
+  EmitPrefix(entry);
+  EmitOpcode(entry);
+}
+
 static uint8_t ModrmForDisp(int base, int disp) {
   // BP requires an explicit disp, so do not omit it in the 0 case
   if (disp == 0 && base != rBP) {
@@ -499,7 +544,7 @@ static uint8_t ModrmForDisp(int base, int disp) {
   }
 }
 
-void X86Mir2Lir::EmitDisp(int base, int disp) {
+void X86Mir2Lir::EmitDisp(uint8_t base, int disp) {
   // BP requires an explicit disp, so do not omit it in the 0 case
   if (disp == 0 && base != rBP) {
     return;
@@ -513,138 +558,22 @@ void X86Mir2Lir::EmitDisp(int base, int disp) {
   }
 }
 
-void X86Mir2Lir::EmitOpReg(const X86EncodingMap* entry, uint8_t reg) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
-  if (X86_FPREG(reg)) {
-    reg = reg & X86_FP_REG_MASK;
-  }
-  if (reg >= 4) {
-    DCHECK(strchr(entry->name, '8') == NULL) << entry->name << " " << static_cast<int>(reg)
-        << " in " << PrettyMethod(cu_->method_idx, *cu_->dex_file);
-  }
-  DCHECK_LT(reg, 8);
-  uint8_t modrm = (3 << 6) | (entry->skeleton.modrm_opcode << 3) | reg;
-  code_buffer_.push_back(modrm);
-  DCHECK_EQ(0, entry->skeleton.ax_opcode);
-  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
-}
-
-void X86Mir2Lir::EmitOpMem(const X86EncodingMap* entry, uint8_t base, int disp) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-  DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  DCHECK_LT(entry->skeleton.modrm_opcode, 8);
+void X86Mir2Lir::EmitModrmDisp(uint8_t reg_or_opcode, uint8_t base, int disp) {
+  DCHECK_LT(reg_or_opcode, 8);
   DCHECK_LT(base, 8);
-  uint8_t modrm = (ModrmForDisp(base, disp) << 6) | (entry->skeleton.modrm_opcode << 3) | base;
-  code_buffer_.push_back(modrm);
-  EmitDisp(base, disp);
-  DCHECK_EQ(0, entry->skeleton.ax_opcode);
-  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
-}
-
-void X86Mir2Lir::EmitMemReg(const X86EncodingMap* entry,
-                       uint8_t base, int disp, uint8_t reg) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
-  if (X86_FPREG(reg)) {
-    reg = reg & X86_FP_REG_MASK;
-  }
-  if (reg >= 4) {
-    DCHECK(strchr(entry->name, '8') == NULL) << entry->name << " " << static_cast<int>(reg)
-        << " in " << PrettyMethod(cu_->method_idx, *cu_->dex_file);
-  }
-  DCHECK_LT(reg, 8);
-  DCHECK_LT(base, 8);
-  uint8_t modrm = (ModrmForDisp(base, disp) << 6) | (reg << 3) | base;
+  uint8_t modrm = (ModrmForDisp(base, disp) << 6) | (reg_or_opcode << 3) | base;
   code_buffer_.push_back(modrm);
   if (base == rX86_SP) {
     // Special SIB for SP base
     code_buffer_.push_back(0 << 6 | (rX86_SP << 3) | rX86_SP);
   }
   EmitDisp(base, disp);
-  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
-  DCHECK_EQ(0, entry->skeleton.ax_opcode);
-  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
 }
 
-void X86Mir2Lir::EmitRegMem(const X86EncodingMap* entry,
-                       uint8_t reg, uint8_t base, int disp) {
-  // Opcode will flip operands.
-  EmitMemReg(entry, base, disp, reg);
-}
-
-void X86Mir2Lir::EmitRegArray(const X86EncodingMap* entry, uint8_t reg, uint8_t base, uint8_t index,
-                  int scale, int disp) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
-  if (X86_FPREG(reg)) {
-    reg = reg & X86_FP_REG_MASK;
-  }
-  DCHECK_LT(reg, 8);
-  uint8_t modrm = (ModrmForDisp(base, disp) << 6) | (reg << 3) | rX86_SP;
+void X86Mir2Lir::EmitModrmSibDisp(uint8_t reg_or_opcode, uint8_t base, uint8_t index,
+                                  int scale, int disp) {
+  DCHECK_LT(reg_or_opcode, 8);
+  uint8_t modrm = (ModrmForDisp(base, disp) << 6) | (reg_or_opcode << 3) | rX86_SP;
   code_buffer_.push_back(modrm);
   DCHECK_LT(scale, 4);
   DCHECK_LT(index, 8);
@@ -652,124 +581,9 @@ void X86Mir2Lir::EmitRegArray(const X86EncodingMap* entry, uint8_t reg, uint8_t 
   uint8_t sib = (scale << 6) | (index << 3) | base;
   code_buffer_.push_back(sib);
   EmitDisp(base, disp);
-  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
-  DCHECK_EQ(0, entry->skeleton.ax_opcode);
-  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
 }
 
-void X86Mir2Lir::EmitArrayReg(const X86EncodingMap* entry, uint8_t base, uint8_t index, int scale, int disp,
-                  uint8_t reg) {
-  // Opcode will flip operands.
-  EmitRegArray(entry, reg, base, index, scale, disp);
-}
-
-void X86Mir2Lir::EmitRegThread(const X86EncodingMap* entry, uint8_t reg, int disp) {
-  DCHECK_NE(entry->skeleton.prefix1, 0);
-  code_buffer_.push_back(entry->skeleton.prefix1);
-  if (entry->skeleton.prefix2 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
-  if (X86_FPREG(reg)) {
-    reg = reg & X86_FP_REG_MASK;
-  }
-  if (reg >= 4) {
-    DCHECK(strchr(entry->name, '8') == NULL) << entry->name << " " << static_cast<int>(reg)
-        << " in " << PrettyMethod(cu_->method_idx, *cu_->dex_file);
-  }
-  DCHECK_LT(reg, 8);
-  uint8_t modrm = (0 << 6) | (reg << 3) | rBP;
-  code_buffer_.push_back(modrm);
-  code_buffer_.push_back(disp & 0xFF);
-  code_buffer_.push_back((disp >> 8) & 0xFF);
-  code_buffer_.push_back((disp >> 16) & 0xFF);
-  code_buffer_.push_back((disp >> 24) & 0xFF);
-  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
-  DCHECK_EQ(0, entry->skeleton.ax_opcode);
-  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
-}
-
-void X86Mir2Lir::EmitRegReg(const X86EncodingMap* entry, uint8_t reg1, uint8_t reg2) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
-  if (X86_FPREG(reg1)) {
-    reg1 = reg1 & X86_FP_REG_MASK;
-  }
-  if (X86_FPREG(reg2)) {
-    reg2 = reg2 & X86_FP_REG_MASK;
-  }
-  DCHECK_LT(reg1, 8);
-  DCHECK_LT(reg2, 8);
-  uint8_t modrm = (3 << 6) | (reg1 << 3) | reg2;
-  code_buffer_.push_back(modrm);
-  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
-  DCHECK_EQ(0, entry->skeleton.ax_opcode);
-  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
-}
-
-void X86Mir2Lir::EmitRegRegImm(const X86EncodingMap* entry,
-                          uint8_t reg1, uint8_t reg2, int32_t imm) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
-  if (X86_FPREG(reg1)) {
-    reg1 = reg1 & X86_FP_REG_MASK;
-  }
-  if (X86_FPREG(reg2)) {
-    reg2 = reg2 & X86_FP_REG_MASK;
-  }
-  DCHECK_LT(reg1, 8);
-  DCHECK_LT(reg2, 8);
-  uint8_t modrm = (3 << 6) | (reg1 << 3) | reg2;
-  code_buffer_.push_back(modrm);
-  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
-  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+void X86Mir2Lir::EmitImm(const X86EncodingMap* entry, int imm) {
   switch (entry->skeleton.immediate_bytes) {
     case 1:
       DCHECK(IS_SIMM8(imm));
@@ -793,6 +607,153 @@ void X86Mir2Lir::EmitRegRegImm(const X86EncodingMap* entry,
   }
 }
 
+void X86Mir2Lir::EmitOpRegOpcode(const X86EncodingMap* entry, uint8_t reg) {
+  EmitPrefixAndOpcode(entry);
+  // There's no 3-byte instruction with +rd
+  DCHECK(entry->skeleton.opcode != 0x0F ||
+         (entry->skeleton.extra_opcode1 != 0x38 && entry->skeleton.extra_opcode1 != 0x3A));
+  DCHECK(!X86_FPREG(reg));
+  DCHECK_LT(reg, 8);
+  code_buffer_.back() += reg;
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitOpReg(const X86EncodingMap* entry, uint8_t reg) {
+  EmitPrefixAndOpcode(entry);
+  if (X86_FPREG(reg)) {
+    reg = reg & X86_FP_REG_MASK;
+  }
+  if (reg >= 4) {
+    DCHECK(strchr(entry->name, '8') == NULL) << entry->name << " " << static_cast<int>(reg)
+        << " in " << PrettyMethod(cu_->method_idx, *cu_->dex_file);
+  }
+  DCHECK_LT(reg, 8);
+  uint8_t modrm = (3 << 6) | (entry->skeleton.modrm_opcode << 3) | reg;
+  code_buffer_.push_back(modrm);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitOpMem(const X86EncodingMap* entry, uint8_t base, int disp) {
+  EmitPrefix(entry);
+  code_buffer_.push_back(entry->skeleton.opcode);
+  DCHECK_NE(0x0F, entry->skeleton.opcode);
+  DCHECK_EQ(0, entry->skeleton.extra_opcode1);
+  DCHECK_EQ(0, entry->skeleton.extra_opcode2);
+  DCHECK_NE(rX86_SP, base);
+  EmitModrmDisp(entry->skeleton.modrm_opcode, base, disp);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitOpArray(const X86EncodingMap* entry, uint8_t base, uint8_t index,
+                             int scale, int disp) {
+  EmitPrefixAndOpcode(entry);
+  EmitModrmSibDisp(entry->skeleton.modrm_opcode, base, index, scale, disp);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitMemReg(const X86EncodingMap* entry,
+                       uint8_t base, int disp, uint8_t reg) {
+  EmitPrefixAndOpcode(entry);
+  if (X86_FPREG(reg)) {
+    reg = reg & X86_FP_REG_MASK;
+  }
+  if (reg >= 4) {
+    DCHECK(strchr(entry->name, '8') == NULL ||
+           entry->opcode == kX86Movzx8RM || entry->opcode == kX86Movsx8RM)
+        << entry->name << " " << static_cast<int>(reg)
+        << " in " << PrettyMethod(cu_->method_idx, *cu_->dex_file);
+  }
+  EmitModrmDisp(reg, base, disp);
+  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitRegMem(const X86EncodingMap* entry,
+                       uint8_t reg, uint8_t base, int disp) {
+  // Opcode will flip operands.
+  EmitMemReg(entry, base, disp, reg);
+}
+
+void X86Mir2Lir::EmitRegArray(const X86EncodingMap* entry, uint8_t reg, uint8_t base, uint8_t index,
+                              int scale, int disp) {
+  EmitPrefixAndOpcode(entry);
+  if (X86_FPREG(reg)) {
+    reg = reg & X86_FP_REG_MASK;
+  }
+  EmitModrmSibDisp(reg, base, index, scale, disp);
+  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitArrayReg(const X86EncodingMap* entry, uint8_t base, uint8_t index, int scale, int disp,
+                  uint8_t reg) {
+  // Opcode will flip operands.
+  EmitRegArray(entry, reg, base, index, scale, disp);
+}
+
+void X86Mir2Lir::EmitRegThread(const X86EncodingMap* entry, uint8_t reg, int disp) {
+  DCHECK_NE(entry->skeleton.prefix1, 0);
+  EmitPrefixAndOpcode(entry);
+  if (X86_FPREG(reg)) {
+    reg = reg & X86_FP_REG_MASK;
+  }
+  if (reg >= 4) {
+    DCHECK(strchr(entry->name, '8') == NULL) << entry->name << " " << static_cast<int>(reg)
+        << " in " << PrettyMethod(cu_->method_idx, *cu_->dex_file);
+  }
+  DCHECK_LT(reg, 8);
+  uint8_t modrm = (0 << 6) | (reg << 3) | rBP;
+  code_buffer_.push_back(modrm);
+  code_buffer_.push_back(disp & 0xFF);
+  code_buffer_.push_back((disp >> 8) & 0xFF);
+  code_buffer_.push_back((disp >> 16) & 0xFF);
+  code_buffer_.push_back((disp >> 24) & 0xFF);
+  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitRegReg(const X86EncodingMap* entry, uint8_t reg1, uint8_t reg2) {
+  EmitPrefixAndOpcode(entry);
+  if (X86_FPREG(reg1)) {
+    reg1 = reg1 & X86_FP_REG_MASK;
+  }
+  if (X86_FPREG(reg2)) {
+    reg2 = reg2 & X86_FP_REG_MASK;
+  }
+  DCHECK_LT(reg1, 8);
+  DCHECK_LT(reg2, 8);
+  uint8_t modrm = (3 << 6) | (reg1 << 3) | reg2;
+  code_buffer_.push_back(modrm);
+  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+}
+
+void X86Mir2Lir::EmitRegRegImm(const X86EncodingMap* entry,
+                          uint8_t reg1, uint8_t reg2, int32_t imm) {
+  EmitPrefixAndOpcode(entry);
+  if (X86_FPREG(reg1)) {
+    reg1 = reg1 & X86_FP_REG_MASK;
+  }
+  if (X86_FPREG(reg2)) {
+    reg2 = reg2 & X86_FP_REG_MASK;
+  }
+  DCHECK_LT(reg1, 8);
+  DCHECK_LT(reg2, 8);
+  uint8_t modrm = (3 << 6) | (reg1 << 3) | reg2;
+  code_buffer_.push_back(modrm);
+  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  EmitImm(entry, imm);
+}
+
 void X86Mir2Lir::EmitRegImm(const X86EncodingMap* entry, uint8_t reg, int imm) {
   if (entry->skeleton.prefix1 != 0) {
     code_buffer_.push_back(entry->skeleton.prefix1);
@@ -805,95 +766,32 @@ void X86Mir2Lir::EmitRegImm(const X86EncodingMap* entry, uint8_t reg, int imm) {
   if (reg == rAX && entry->skeleton.ax_opcode != 0) {
     code_buffer_.push_back(entry->skeleton.ax_opcode);
   } else {
-    code_buffer_.push_back(entry->skeleton.opcode);
-    if (entry->skeleton.opcode == 0x0F) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode1);
-      if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-        code_buffer_.push_back(entry->skeleton.extra_opcode2);
-      } else {
-        DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-      }
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
+    EmitOpcode(entry);
     if (X86_FPREG(reg)) {
       reg = reg & X86_FP_REG_MASK;
     }
     uint8_t modrm = (3 << 6) | (entry->skeleton.modrm_opcode << 3) | reg;
     code_buffer_.push_back(modrm);
   }
-  switch (entry->skeleton.immediate_bytes) {
-    case 1:
-      DCHECK(IS_SIMM8(imm));
-      code_buffer_.push_back(imm & 0xFF);
-      break;
-    case 2:
-      DCHECK(IS_SIMM16(imm));
-      code_buffer_.push_back(imm & 0xFF);
-      code_buffer_.push_back((imm >> 8) & 0xFF);
-      break;
-    case 4:
-      code_buffer_.push_back(imm & 0xFF);
-      code_buffer_.push_back((imm >> 8) & 0xFF);
-      code_buffer_.push_back((imm >> 16) & 0xFF);
-      code_buffer_.push_back((imm >> 24) & 0xFF);
-      break;
-    default:
-      LOG(FATAL) << "Unexpected immediate bytes (" << entry->skeleton.immediate_bytes
-          << ") for instruction: " << entry->name;
-      break;
-  }
+  EmitImm(entry, imm);
+}
+
+void X86Mir2Lir::EmitMemImm(const X86EncodingMap* entry, uint8_t base, int disp, int32_t imm) {
+  EmitPrefixAndOpcode(entry);
+  EmitModrmDisp(entry->skeleton.modrm_opcode, base, disp);
+  DCHECK_EQ(0, entry->skeleton.ax_opcode);
+  EmitImm(entry, imm);
 }
 
 void X86Mir2Lir::EmitThreadImm(const X86EncodingMap* entry, int disp, int imm) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
+  EmitPrefixAndOpcode(entry);
   uint8_t modrm = (0 << 6) | (entry->skeleton.modrm_opcode << 3) | rBP;
   code_buffer_.push_back(modrm);
   code_buffer_.push_back(disp & 0xFF);
   code_buffer_.push_back((disp >> 8) & 0xFF);
   code_buffer_.push_back((disp >> 16) & 0xFF);
   code_buffer_.push_back((disp >> 24) & 0xFF);
-  switch (entry->skeleton.immediate_bytes) {
-    case 1:
-      DCHECK(IS_SIMM8(imm));
-      code_buffer_.push_back(imm & 0xFF);
-      break;
-    case 2:
-      DCHECK(IS_SIMM16(imm));
-      code_buffer_.push_back(imm & 0xFF);
-      code_buffer_.push_back((imm >> 8) & 0xFF);
-      break;
-    case 4:
-      code_buffer_.push_back(imm & 0xFF);
-      code_buffer_.push_back((imm >> 8) & 0xFF);
-      code_buffer_.push_back((imm >> 16) & 0xFF);
-      code_buffer_.push_back((imm >> 24) & 0xFF);
-      break;
-    default:
-      LOG(FATAL) << "Unexpected immediate bytes (" << entry->skeleton.immediate_bytes
-          << ") for instruction: " << entry->name;
-      break;
-  }
+  EmitImm(entry, imm);
   DCHECK_EQ(entry->skeleton.ax_opcode, 0);
 }
 
@@ -907,31 +805,16 @@ void X86Mir2Lir::EmitMovRegImm(const X86EncodingMap* entry, uint8_t reg, int imm
 }
 
 void X86Mir2Lir::EmitShiftRegImm(const X86EncodingMap* entry, uint8_t reg, int imm) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
+  EmitPrefix(entry);
   if (imm != 1) {
     code_buffer_.push_back(entry->skeleton.opcode);
   } else {
     // Shorter encoding for 1 bit shift
     code_buffer_.push_back(entry->skeleton.ax_opcode);
   }
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
+  DCHECK_NE(0x0F, entry->skeleton.opcode);
+  DCHECK_EQ(0, entry->skeleton.extra_opcode1);
+  DCHECK_EQ(0, entry->skeleton.extra_opcode2);
   if (reg >= 4) {
     DCHECK(strchr(entry->name, '8') == NULL) << entry->name << " " << static_cast<int>(reg)
         << " in " << PrettyMethod(cu_->method_idx, *cu_->dex_file);
@@ -948,15 +831,9 @@ void X86Mir2Lir::EmitShiftRegImm(const X86EncodingMap* entry, uint8_t reg, int i
 
 void X86Mir2Lir::EmitShiftRegCl(const X86EncodingMap* entry, uint8_t reg, uint8_t cl) {
   DCHECK_EQ(cl, static_cast<uint8_t>(rCX));
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
+  EmitPrefix(entry);
   code_buffer_.push_back(entry->skeleton.opcode);
+  DCHECK_NE(0x0F, entry->skeleton.opcode);
   DCHECK_EQ(0, entry->skeleton.extra_opcode1);
   DCHECK_EQ(0, entry->skeleton.extra_opcode2);
   DCHECK_LT(reg, 8);
@@ -985,6 +862,30 @@ void X86Mir2Lir::EmitRegCond(const X86EncodingMap* entry, uint8_t reg, uint8_t c
   uint8_t modrm = (3 << 6) | (entry->skeleton.modrm_opcode << 3) | reg;
   code_buffer_.push_back(modrm);
   DCHECK_EQ(entry->skeleton.immediate_bytes, 0);
+}
+
+void X86Mir2Lir::EmitRegRegCond(const X86EncodingMap* entry, uint8_t reg1, uint8_t reg2, uint8_t condition) {
+  // Generate prefix and opcode without the condition
+  EmitPrefixAndOpcode(entry);
+
+  // Now add the condition. The last byte of opcode is the one that receives it.
+  DCHECK_LE(condition, 0xF);
+  code_buffer_.back() += condition;
+
+  // Not expecting to have to encode immediate or do anything special for ModR/M since there are two registers.
+  DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+  DCHECK_EQ(0, entry->skeleton.modrm_opcode);
+
+  // Check that registers requested for encoding are sane.
+  DCHECK_LT(reg1, 8);
+  DCHECK_LT(reg2, 8);
+
+  // For register to register encoding, the mod is 3.
+  const uint8_t mod = (3 << 6);
+
+  // Encode the ModR/M byte now.
+  const uint8_t modrm = mod | (reg1 << 3) | reg2;
+  code_buffer_.push_back(modrm);
 }
 
 void X86Mir2Lir::EmitJmp(const X86EncodingMap* entry, int rel) {
@@ -1026,55 +927,15 @@ void X86Mir2Lir::EmitJcc(const X86EncodingMap* entry, int rel, uint8_t cc) {
 }
 
 void X86Mir2Lir::EmitCallMem(const X86EncodingMap* entry, uint8_t base, int disp) {
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
-  uint8_t modrm = (ModrmForDisp(base, disp) << 6) | (entry->skeleton.modrm_opcode << 3) | base;
-  code_buffer_.push_back(modrm);
-  if (base == rX86_SP) {
-    // Special SIB for SP base
-    code_buffer_.push_back(0 << 6 | (rX86_SP << 3) | rX86_SP);
-  }
-  EmitDisp(base, disp);
+  EmitPrefixAndOpcode(entry);
+  EmitModrmDisp(entry->skeleton.modrm_opcode, base, disp);
   DCHECK_EQ(0, entry->skeleton.ax_opcode);
   DCHECK_EQ(0, entry->skeleton.immediate_bytes);
 }
 
 void X86Mir2Lir::EmitCallThread(const X86EncodingMap* entry, int disp) {
   DCHECK_NE(entry->skeleton.prefix1, 0);
-  code_buffer_.push_back(entry->skeleton.prefix1);
-  if (entry->skeleton.prefix2 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix2);
-  }
-  code_buffer_.push_back(entry->skeleton.opcode);
-  if (entry->skeleton.opcode == 0x0F) {
-    code_buffer_.push_back(entry->skeleton.extra_opcode1);
-    if (entry->skeleton.extra_opcode1 == 0x38 || entry->skeleton.extra_opcode2 == 0x3A) {
-      code_buffer_.push_back(entry->skeleton.extra_opcode2);
-    } else {
-      DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.extra_opcode1);
-    DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-  }
+  EmitPrefixAndOpcode(entry);
   uint8_t modrm = (0 << 6) | (entry->skeleton.modrm_opcode << 3) | rBP;
   code_buffer_.push_back(modrm);
   code_buffer_.push_back(disp & 0xFF);
@@ -1089,27 +950,23 @@ void X86Mir2Lir::EmitPcRel(const X86EncodingMap* entry, uint8_t reg,
                       int base_or_table, uint8_t index, int scale, int table_or_disp) {
   int disp;
   if (entry->opcode == kX86PcRelLoadRA) {
-    Mir2Lir::SwitchTable *tab_rec = reinterpret_cast<Mir2Lir::SwitchTable*>(table_or_disp);
+    Mir2Lir::EmbeddedData *tab_rec =
+        reinterpret_cast<Mir2Lir::EmbeddedData*>(UnwrapPointer(table_or_disp));
     disp = tab_rec->offset;
   } else {
     DCHECK(entry->opcode == kX86PcRelAdr);
-    Mir2Lir::FillArrayData *tab_rec = reinterpret_cast<Mir2Lir::FillArrayData*>(base_or_table);
+    Mir2Lir::EmbeddedData *tab_rec =
+        reinterpret_cast<Mir2Lir::EmbeddedData*>(UnwrapPointer(base_or_table));
     disp = tab_rec->offset;
   }
-  if (entry->skeleton.prefix1 != 0) {
-    code_buffer_.push_back(entry->skeleton.prefix1);
-    if (entry->skeleton.prefix2 != 0) {
-      code_buffer_.push_back(entry->skeleton.prefix2);
-    }
-  } else {
-    DCHECK_EQ(0, entry->skeleton.prefix2);
-  }
+  EmitPrefix(entry);
   if (X86_FPREG(reg)) {
     reg = reg & X86_FP_REG_MASK;
   }
   DCHECK_LT(reg, 8);
   if (entry->opcode == kX86PcRelLoadRA) {
     code_buffer_.push_back(entry->skeleton.opcode);
+    DCHECK_NE(0x0F, entry->skeleton.opcode);
     DCHECK_EQ(0, entry->skeleton.extra_opcode1);
     DCHECK_EQ(0, entry->skeleton.extra_opcode2);
     uint8_t modrm = (2 << 6) | (reg << 3) | rX86_SP;
@@ -1160,13 +1017,13 @@ void X86Mir2Lir::EmitUnimplemented(const X86EncodingMap* entry, LIR* lir) {
  * instruction.  In those cases we will try to substitute a new code
  * sequence or request that the trace be shortened and retried.
  */
-AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
+AssemblerStatus X86Mir2Lir::AssembleInstructions(CodeOffset start_addr) {
   LIR *lir;
   AssemblerStatus res = kSuccess;  // Assume success
 
   const bool kVerbosePcFixup = false;
   for (lir = first_lir_insn_; lir != NULL; lir = NEXT_LIR(lir)) {
-    if (lir->opcode < 0) {
+    if (IsPseudoLirOp(lir->opcode)) {
       continue;
     }
 
@@ -1174,19 +1031,19 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
       continue;
     }
 
-    if (lir->flags.pcRelFixup) {
+    if (lir->flags.fixup != kFixupNone) {
       switch (lir->opcode) {
         case kX86Jcc8: {
           LIR *target_lir = lir->target;
           DCHECK(target_lir != NULL);
           int delta = 0;
-          uintptr_t pc;
+          CodeOffset pc;
           if (IS_SIMM8(lir->operands[0])) {
             pc = lir->offset + 2 /* opcode + rel8 */;
           } else {
             pc = lir->offset + 6 /* 2 byte opcode + rel32 */;
           }
-          uintptr_t target = target_lir->offset;
+          CodeOffset target = target_lir->offset;
           delta = target - pc;
           if (IS_SIMM8(delta) != IS_SIMM8(lir->operands[0])) {
             if (kVerbosePcFixup) {
@@ -1210,8 +1067,8 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
         case kX86Jcc32: {
           LIR *target_lir = lir->target;
           DCHECK(target_lir != NULL);
-          uintptr_t pc = lir->offset + 6 /* 2 byte opcode + rel32 */;
-          uintptr_t target = target_lir->offset;
+          CodeOffset pc = lir->offset + 6 /* 2 byte opcode + rel32 */;
+          CodeOffset target = target_lir->offset;
           int delta = target - pc;
           if (kVerbosePcFixup) {
             LOG(INFO) << "Source:";
@@ -1227,17 +1084,17 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
           LIR *target_lir = lir->target;
           DCHECK(target_lir != NULL);
           int delta = 0;
-          uintptr_t pc;
+          CodeOffset pc;
           if (IS_SIMM8(lir->operands[0])) {
             pc = lir->offset + 2 /* opcode + rel8 */;
           } else {
             pc = lir->offset + 5 /* opcode + rel32 */;
           }
-          uintptr_t target = target_lir->offset;
+          CodeOffset target = target_lir->offset;
           delta = target - pc;
           if (!(cu_->disable_opt & (1 << kSafeOptimizations)) && delta == 0) {
             // Useless branch
-            lir->flags.is_nop = true;
+            NopLIR(lir);
             if (kVerbosePcFixup) {
               LOG(INFO) << "Retry for useless branch at " << lir->offset;
             }
@@ -1256,8 +1113,8 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
         case kX86Jmp32: {
           LIR *target_lir = lir->target;
           DCHECK(target_lir != NULL);
-          uintptr_t pc = lir->offset + 5 /* opcode + rel32 */;
-          uintptr_t target = target_lir->offset;
+          CodeOffset pc = lir->offset + 5 /* opcode + rel32 */;
+          CodeOffset target = target_lir->offset;
           int delta = target - pc;
           lir->operands[0] = delta;
           break;
@@ -1285,18 +1142,13 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
       case kNullary:  // 1 byte of opcode
         DCHECK_EQ(0, entry->skeleton.prefix1);
         DCHECK_EQ(0, entry->skeleton.prefix2);
-        code_buffer_.push_back(entry->skeleton.opcode);
-        if (entry->skeleton.extra_opcode1 != 0) {
-          code_buffer_.push_back(entry->skeleton.extra_opcode1);
-          if (entry->skeleton.extra_opcode2 != 0) {
-            code_buffer_.push_back(entry->skeleton.extra_opcode2);
-          }
-        } else {
-          DCHECK_EQ(0, entry->skeleton.extra_opcode2);
-        }
+        EmitOpcode(entry);
         DCHECK_EQ(0, entry->skeleton.modrm_opcode);
         DCHECK_EQ(0, entry->skeleton.ax_opcode);
         DCHECK_EQ(0, entry->skeleton.immediate_bytes);
+        break;
+      case kRegOpcode:  // lir operands - 0: reg
+        EmitOpRegOpcode(entry, lir->operands[0]);
         break;
       case kReg:  // lir operands - 0: reg
         EmitOpReg(entry, lir->operands[0]);
@@ -1304,8 +1156,14 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
       case kMem:  // lir operands - 0: base, 1: disp
         EmitOpMem(entry, lir->operands[0], lir->operands[1]);
         break;
+      case kArray:  // lir operands - 0: base, 1: index, 2: scale, 3: disp
+        EmitOpArray(entry, lir->operands[0], lir->operands[1], lir->operands[2], lir->operands[3]);
+        break;
       case kMemReg:  // lir operands - 0: base, 1: disp, 2: reg
         EmitMemReg(entry, lir->operands[0], lir->operands[1], lir->operands[2]);
+        break;
+      case kMemImm:  // lir operands - 0: base, 1: disp, 2: immediate
+        EmitMemImm(entry, lir->operands[0], lir->operands[1], lir->operands[2]);
         break;
       case kArrayReg:  // lir operands - 0: base, 1: index, 2: scale, 3: disp, 4: reg
         EmitArrayReg(entry, lir->operands[0], lir->operands[1], lir->operands[2],
@@ -1348,6 +1206,9 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
       case kRegCond:  // lir operands - 0: reg, 1: condition
         EmitRegCond(entry, lir->operands[0], lir->operands[1]);
         break;
+      case kRegRegCond:  // lir operands - 0: reg, 1: reg, 2: condition
+        EmitRegRegCond(entry, lir->operands[0], lir->operands[1], lir->operands[2]);
+        break;
       case kJmp:  // lir operands - 0: rel
         EmitJmp(entry, lir->operands[0]);
         break;
@@ -1383,6 +1244,102 @@ AssemblerStatus X86Mir2Lir::AssembleInstructions(uintptr_t start_addr) {
         << "Instruction size mismatch for entry: " << X86Mir2Lir::EncodingMap[lir->opcode].name;
   }
   return res;
+}
+
+// LIR offset assignment.
+// TODO: consolidate w/ Arm assembly mechanism.
+int X86Mir2Lir::AssignInsnOffsets() {
+  LIR* lir;
+  int offset = 0;
+
+  for (lir = first_lir_insn_; lir != NULL; lir = NEXT_LIR(lir)) {
+    lir->offset = offset;
+    if (LIKELY(!IsPseudoLirOp(lir->opcode))) {
+      if (!lir->flags.is_nop) {
+        offset += lir->flags.size;
+      }
+    } else if (UNLIKELY(lir->opcode == kPseudoPseudoAlign4)) {
+      if (offset & 0x2) {
+        offset += 2;
+        lir->operands[0] = 1;
+      } else {
+        lir->operands[0] = 0;
+      }
+    }
+    /* Pseudo opcodes don't consume space */
+  }
+  return offset;
+}
+
+/*
+ * Walk the compilation unit and assign offsets to instructions
+ * and literals and compute the total size of the compiled unit.
+ * TODO: consolidate w/ Arm assembly mechanism.
+ */
+void X86Mir2Lir::AssignOffsets() {
+  int offset = AssignInsnOffsets();
+
+  /* Const values have to be word aligned */
+  offset = (offset + 3) & ~3;
+
+  /* Set up offsets for literals */
+  data_offset_ = offset;
+
+  offset = AssignLiteralOffset(offset);
+
+  offset = AssignSwitchTablesOffset(offset);
+
+  offset = AssignFillArrayDataOffset(offset);
+
+  total_size_ = offset;
+}
+
+/*
+ * Go over each instruction in the list and calculate the offset from the top
+ * before sending them off to the assembler. If out-of-range branch distance is
+ * seen rearrange the instructions a bit to correct it.
+ * TODO: consolidate w/ Arm assembly mechanism.
+ */
+void X86Mir2Lir::AssembleLIR() {
+  cu_->NewTimingSplit("Assemble");
+  AssignOffsets();
+  int assembler_retries = 0;
+  /*
+   * Assemble here.  Note that we generate code with optimistic assumptions
+   * and if found now to work, we'll have to redo the sequence and retry.
+   */
+
+  while (true) {
+    AssemblerStatus res = AssembleInstructions(0);
+    if (res == kSuccess) {
+      break;
+    } else {
+      assembler_retries++;
+      if (assembler_retries > MAX_ASSEMBLER_RETRIES) {
+        CodegenDump();
+        LOG(FATAL) << "Assembler error - too many retries";
+      }
+      // Redo offsets and try again
+      AssignOffsets();
+      code_buffer_.clear();
+    }
+  }
+
+  // Install literals
+  InstallLiteralPools();
+
+  // Install switch tables
+  InstallSwitchTables();
+
+  // Install fill array data
+  InstallFillArrayData();
+
+  // Create the mapping table and native offset to reference map.
+  cu_->NewTimingSplit("PcMappingTable");
+  CreateMappingTables();
+
+  cu_->NewTimingSplit("GcMap");
+  CreateNativeGcMap();
 }
 
 }  // namespace art

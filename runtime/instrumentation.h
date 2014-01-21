@@ -17,10 +17,12 @@
 #ifndef ART_RUNTIME_INSTRUMENTATION_H_
 #define ART_RUNTIME_INSTRUMENTATION_H_
 
+#include "atomic_integer.h"
 #include "base/macros.h"
 #include "locks.h"
 
 #include <stdint.h>
+#include <set>
 #include <list>
 
 namespace art {
@@ -36,7 +38,13 @@ class ThrowLocation;
 
 namespace instrumentation {
 
-const bool kVerboseInstrumentation = false;
+// Interpreter handler tables.
+enum InterpreterHandlerTable {
+  kMainHandlerTable = 0,          // Main handler table: no suspend check, no instrumentation.
+  kAlternativeHandlerTable = 1,   // Alternative handler table: suspend check and/or instrumentation
+                                  // enabled.
+  kNumHandlerTables
+};
 
 // Instrumentation event listener API. Registered listeners will get the appropriate call back for
 // the events they are listening for. The call backs supply the thread, method and dex_pc the event
@@ -60,8 +68,9 @@ struct InstrumentationListener {
 
   // Call-back for when a method is popped due to an exception throw. A method will either cause a
   // MethodExited call-back or a MethodUnwind call-back when its activation is removed.
-  virtual void MethodUnwind(Thread* thread, const mirror::ArtMethod* method,
-                            uint32_t dex_pc) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) = 0;
+  virtual void MethodUnwind(Thread* thread, mirror::Object* this_object,
+                            const mirror::ArtMethod* method, uint32_t dex_pc)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) = 0;
 
   // Call-back for when the dex pc moves in a method.
   virtual void DexPcMoved(Thread* thread, mirror::Object* this_object,
@@ -95,7 +104,9 @@ class Instrumentation {
       interpret_only_(false), forced_interpret_only_(false),
       have_method_entry_listeners_(false), have_method_exit_listeners_(false),
       have_method_unwind_listeners_(false), have_dex_pc_listeners_(false),
-      have_exception_caught_listeners_(false) {}
+      have_exception_caught_listeners_(false),
+      interpreter_handler_table_(kMainHandlerTable),
+      quick_alloc_entry_points_instrumentation_counter_(0) {}
 
   // Add a listener to be notified of the masked together sent of instrumentation events. This
   // suspend the runtime to install stubs. You are expected to hold the mutator lock as a proxy
@@ -110,8 +121,58 @@ class Instrumentation {
       EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_)
       LOCKS_EXCLUDED(Locks::thread_list_lock_, Locks::classlinker_classes_lock_);
 
+  // Deoptimization.
+  void EnableDeoptimization() EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
+  void DisableDeoptimization() EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
+  bool IsDeoptimizationEnabled() const SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // Executes everything with interpreter.
+  void DeoptimizeEverything()
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_)
+      LOCKS_EXCLUDED(Locks::thread_list_lock_, Locks::classlinker_classes_lock_);
+
+  // Executes everything with compiled code (or interpreter if there is no code).
+  void UndeoptimizeEverything()
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_)
+      LOCKS_EXCLUDED(Locks::thread_list_lock_, Locks::classlinker_classes_lock_);
+
+  // Deoptimize a method by forcing its execution with the interpreter. Nevertheless, a static
+  // method (except a class initializer) set to the resolution trampoline will be deoptimized only
+  // once its declaring class is initialized.
+  void Deoptimize(mirror::ArtMethod* method)
+      LOCKS_EXCLUDED(Locks::thread_list_lock_)
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  // Undeoptimze the method by restoring its entrypoints. Nevertheless, a static method
+  // (except a class initializer) set to the resolution trampoline will be updated only once its
+  // declaring class is initialized.
+  void Undeoptimize(mirror::ArtMethod* method)
+      LOCKS_EXCLUDED(Locks::thread_list_lock_)
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_);
+
+  bool IsDeoptimized(mirror::ArtMethod* method) const;
+
+  // Enable method tracing by installing instrumentation entry/exit stubs.
+  void EnableMethodTracing()
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_)
+      LOCKS_EXCLUDED(Locks::thread_list_lock_, Locks::classlinker_classes_lock_);
+
+  // Disable method tracing by uninstalling instrumentation entry/exit stubs.
+  void DisableMethodTracing()
+      EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_)
+      LOCKS_EXCLUDED(Locks::thread_list_lock_, Locks::classlinker_classes_lock_);
+
+  InterpreterHandlerTable GetInterpreterHandlerTable() const {
+    return interpreter_handler_table_;
+  }
+
+  void InstrumentQuickAllocEntryPoints() LOCKS_EXCLUDED(Locks::thread_list_lock_);
+  void UninstrumentQuickAllocEntryPoints() LOCKS_EXCLUDED(Locks::thread_list_lock_);
+  void ResetQuickAllocEntryPoints();
+
   // Update the code of a method respecting any installed stubs.
-  void UpdateMethodsCode(mirror::ArtMethod* method, const void* code) const;
+  void UpdateMethodsCode(mirror::ArtMethod* method, const void* code) const
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Get the quick code for the given method. More efficient than asking the class linker as it
   // will short-cut to GetCode if instrumentation and static method resolution stubs aren't
@@ -147,6 +208,11 @@ class Instrumentation {
 
   bool HasDexPcListeners() const {
     return have_dex_pc_listeners_;
+  }
+
+  bool IsActive() const {
+    return have_dex_pc_listeners_ || have_method_entry_listeners_ || have_method_exit_listeners_ ||
+        have_exception_caught_listeners_ || have_method_unwind_listeners_;
   }
 
   // Inform listeners that a method has been entered. A dex PC is provided as we may install
@@ -186,7 +252,7 @@ class Instrumentation {
   // Inform listeners that an exception was caught.
   void ExceptionCaughtEvent(Thread* thread, const ThrowLocation& throw_location,
                             mirror::ArtMethod* catch_method, uint32_t catch_dex_pc,
-                            mirror::Throwable* exception_object)
+                            mirror::Throwable* exception_object) const
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   // Called when an instrumented method is entered. The intended link register (lr) is saved so
@@ -209,11 +275,18 @@ class Instrumentation {
   // Call back for configure stubs.
   bool InstallStubsForClass(mirror::Class* klass) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
+  void InstallStubsForMethod(mirror::ArtMethod* method)
+      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
+
  private:
   // Does the job of installing or removing instrumentation code within methods.
   void ConfigureStubs(bool require_entry_exit_stubs, bool require_interpreter)
       EXCLUSIVE_LOCKS_REQUIRED(Locks::mutator_lock_)
       LOCKS_EXCLUDED(Locks::thread_list_lock_, Locks::classlinker_classes_lock_);
+
+  void UpdateInterpreterHandlerTable() {
+    interpreter_handler_table_ = IsActive() ? kAlternativeHandlerTable : kMainHandlerTable;
+  }
 
   void MethodEnterEventImpl(Thread* thread, mirror::Object* this_object,
                             const mirror::ArtMethod* method, uint32_t dex_pc) const
@@ -267,6 +340,19 @@ class Instrumentation {
   std::list<InstrumentationListener*> dex_pc_listeners_ GUARDED_BY(Locks::mutator_lock_);
   std::list<InstrumentationListener*> exception_caught_listeners_ GUARDED_BY(Locks::mutator_lock_);
 
+  // The set of methods being deoptimized (by the debugger) which must be executed with interpreter
+  // only.
+  // TODO we need to visit these methods as roots.
+  std::set<mirror::ArtMethod*> deoptimized_methods_;
+
+  // Current interpreter handler table. This is updated each time the thread state flags are
+  // modified.
+  InterpreterHandlerTable interpreter_handler_table_;
+
+  // Greater than 0 if quick alloc entry points instrumented.
+  // TODO: The access and changes to this is racy and should be guarded by a lock.
+  AtomicInteger quick_alloc_entry_points_instrumentation_counter_;
+
   DISALLOW_COPY_AND_ASSIGN(Instrumentation);
 };
 
@@ -282,9 +368,9 @@ struct InstrumentationStackFrame {
 
   mirror::Object* this_object_;
   mirror::ArtMethod* method_;
-  const uintptr_t return_pc_;
-  const size_t frame_id_;
-  const bool interpreter_entry_;
+  uintptr_t return_pc_;
+  size_t frame_id_;
+  bool interpreter_entry_;
 };
 
 }  // namespace instrumentation

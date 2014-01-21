@@ -22,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "atomic_integer.h"
 #include "base/logging.h"
 #include "base/mutex.h"
 #include "base/stl_util.h"
@@ -224,12 +225,24 @@ static void ThrowNoSuchMethodError(ScopedObjectAccess& soa, Class* c,
                                  kind, ClassHelper(c).GetDescriptor(), name, sig);
 }
 
+static mirror::Class* EnsureInitialized(Thread* self, mirror::Class* klass)
+    SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  if (LIKELY(klass->IsInitialized())) {
+    return klass;
+  }
+  SirtRef<mirror::Class> sirt_klass(self, klass);
+  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(sirt_klass, true, true)) {
+    return nullptr;
+  }
+  return sirt_klass.get();
+}
+
 static jmethodID FindMethodID(ScopedObjectAccess& soa, jclass jni_class,
                               const char* name, const char* sig, bool is_static)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  Class* c = soa.Decode<Class*>(jni_class);
-  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(c, true, true)) {
-    return NULL;
+  Class* c = EnsureInitialized(soa.Self(), soa.Decode<Class*>(jni_class));
+  if (c == nullptr) {
+    return nullptr;
   }
 
   ArtMethod* method = NULL;
@@ -282,17 +295,17 @@ static ClassLoader* GetClassLoader(const ScopedObjectAccess& soa)
 static jfieldID FindFieldID(const ScopedObjectAccess& soa, jclass jni_class, const char* name,
                             const char* sig, bool is_static)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  Class* c = soa.Decode<Class*>(jni_class);
-  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(c, true, true)) {
-    return NULL;
+  Class* c = EnsureInitialized(soa.Self(), soa.Decode<Class*>(jni_class));
+  if (c == nullptr) {
+    return nullptr;
   }
 
   ArtField* field = NULL;
   Class* field_type;
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   if (sig[1] != '\0') {
-    ClassLoader* cl = GetClassLoader(soa);
-    field_type = class_linker->FindClass(sig, cl);
+    SirtRef<mirror::ClassLoader> class_loader(soa.Self(), c->GetClassLoader());
+    field_type = class_linker->FindClass(sig, class_loader);
   } else {
     field_type = class_linker->FindPrimitiveClass(*sig);
   }
@@ -324,14 +337,14 @@ static jfieldID FindFieldID(const ScopedObjectAccess& soa, jclass jni_class, con
   return soa.EncodeField(field);
 }
 
-static void PinPrimitiveArray(const ScopedObjectAccess& soa, const Array* array)
+static void PinPrimitiveArray(const ScopedObjectAccess& soa, Array* array)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   JavaVMExt* vm = soa.Vm();
   MutexLock mu(soa.Self(), vm->pins_lock);
   vm->pin_table.Add(array);
 }
 
-static void UnpinPrimitiveArray(const ScopedObjectAccess& soa, const Array* array)
+static void UnpinPrimitiveArray(const ScopedObjectAccess& soa, Array* array)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   JavaVMExt* vm = soa.Vm();
   MutexLock mu(soa.Self(), vm->pins_lock);
@@ -450,7 +463,7 @@ class SharedLibrary {
         class_loader_(class_loader),
         jni_on_load_lock_("JNI_OnLoad lock"),
         jni_on_load_cond_("JNI_OnLoad condition variable", jni_on_load_lock_),
-        jni_on_load_thread_id_(Thread::Current()->GetThinLockId()),
+        jni_on_load_thread_id_(Thread::Current()->GetThreadId()),
         jni_on_load_result_(kPending) {
   }
 
@@ -475,7 +488,7 @@ class SharedLibrary {
     {
       MutexLock mu(self, jni_on_load_lock_);
 
-      if (jni_on_load_thread_id_ == self->GetThinLockId()) {
+      if (jni_on_load_thread_id_ == self->GetThreadId()) {
         // Check this so we don't end up waiting for ourselves.  We need to return "true" so the
         // caller can continue.
         LOG(INFO) << *self << " recursive attempt to load library " << "\"" << path_ << "\"";
@@ -645,8 +658,8 @@ class JNI {
     ScopedObjectAccess soa(env);
     Class* c = NULL;
     if (runtime->IsStarted()) {
-      ClassLoader* cl = GetClassLoader(soa);
-      c = class_linker->FindClass(descriptor.c_str(), cl);
+      SirtRef<mirror::ClassLoader> class_loader(soa.Self(), GetClassLoader(soa));
+      c = class_linker->FindClass(descriptor.c_str(), class_loader);
     } else {
       c = class_linker->FindSystemClass(descriptor.c_str());
     }
@@ -831,13 +844,14 @@ class JNI {
   }
 
   static jobject NewGlobalRef(JNIEnv* env, jobject obj) {
-    if (obj == NULL) {
-      return NULL;
-    }
     ScopedObjectAccess soa(env);
+    Object* decoded_obj = soa.Decode<Object*>(obj);
+    // Check for null after decoding the object to handle cleared weak globals.
+    if (decoded_obj == nullptr) {
+      return nullptr;
+    }
     JavaVMExt* vm = soa.Vm();
     IndirectReferenceTable& globals = vm->globals;
-    Object* decoded_obj = soa.Decode<Object*>(obj);
     WriterMutexLock mu(soa.Self(), vm->globals_lock);
     IndirectRef ref = globals.Add(IRT_FIRST_SEGMENT, decoded_obj);
     return reinterpret_cast<jobject>(ref);
@@ -871,11 +885,13 @@ class JNI {
   }
 
   static jobject NewLocalRef(JNIEnv* env, jobject obj) {
-    if (obj == NULL) {
-      return NULL;
-    }
     ScopedObjectAccess soa(env);
-    return soa.AddLocalReference<jobject>(soa.Decode<Object*>(obj));
+    mirror::Object* decoded_obj = soa.Decode<Object*>(obj);
+    // Check for null after decoding the object to handle cleared weak globals.
+    if (decoded_obj == nullptr) {
+      return nullptr;
+    }
+    return soa.AddLocalReference<jobject>(decoded_obj);
   }
 
   static void DeleteLocalRef(JNIEnv* env, jobject obj) {
@@ -908,9 +924,9 @@ class JNI {
   static jobject AllocObject(JNIEnv* env, jclass java_class) {
     CHECK_NON_NULL_ARGUMENT(AllocObject, java_class);
     ScopedObjectAccess soa(env);
-    Class* c = soa.Decode<Class*>(java_class);
-    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(c, true, true)) {
-      return NULL;
+    Class* c = EnsureInitialized(soa.Self(), soa.Decode<Class*>(java_class));
+    if (c == nullptr) {
+      return nullptr;
     }
     return soa.AddLocalReference<jobject>(c->AllocObject(soa.Self()));
   }
@@ -929,20 +945,20 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(NewObjectV, java_class);
     CHECK_NON_NULL_ARGUMENT(NewObjectV, mid);
     ScopedObjectAccess soa(env);
-    Class* c = soa.Decode<Class*>(java_class);
-    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(c, true, true)) {
-      return NULL;
+    Class* c = EnsureInitialized(soa.Self(), soa.Decode<Class*>(java_class));
+    if (c == nullptr) {
+      return nullptr;
     }
     Object* result = c->AllocObject(soa.Self());
-    if (result == NULL) {
-      return NULL;
+    if (result == nullptr) {
+      return nullptr;
     }
     jobject local_result = soa.AddLocalReference<jobject>(result);
     CallNonvirtualVoidMethodV(env, local_result, java_class, mid, args);
     if (!soa.Self()->IsExceptionPending()) {
       return local_result;
     } else {
-      return NULL;
+      return nullptr;
     }
   }
 
@@ -950,9 +966,9 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(NewObjectA, java_class);
     CHECK_NON_NULL_ARGUMENT(NewObjectA, mid);
     ScopedObjectAccess soa(env);
-    Class* c = soa.Decode<Class*>(java_class);
-    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(c, true, true)) {
-      return NULL;
+    Class* c = EnsureInitialized(soa.Self(), soa.Decode<Class*>(java_class));
+    if (c == nullptr) {
+      return nullptr;
     }
     Object* result = c->AllocObject(soa.Self());
     if (result == NULL) {
@@ -1938,8 +1954,13 @@ class JNI {
   }
 
   static jstring NewString(JNIEnv* env, const jchar* chars, jsize char_count) {
-    if (UNLIKELY(chars == NULL && char_count > 0)) { \
-      JniAbortF("NewString", "char == null && char_count > 0"); \
+    if (UNLIKELY(char_count < 0)) {
+      JniAbortF("NewString", "char_count < 0: %d", char_count);
+      return nullptr;
+    }
+    if (UNLIKELY(chars == nullptr && char_count > 0)) {
+      JniAbortF("NewString", "chars == null && char_count > 0");
+      return nullptr;
     }
     ScopedObjectAccess soa(env);
     String* result = String::AllocFromUtf16(soa.Self(), char_count, chars);
@@ -1999,16 +2020,24 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(GetStringUTFRegion, java_string);
     ScopedObjectAccess soa(env);
     String* s = soa.Decode<String*>(java_string);
-    const CharArray* chars = s->GetCharArray();
+    CharArray* chars = s->GetCharArray();
     PinPrimitiveArray(soa, chars);
-    if (is_copy != NULL) {
-      *is_copy = JNI_FALSE;
+    if (is_copy != nullptr) {
+      *is_copy = JNI_TRUE;
     }
-    return chars->GetData() + s->GetOffset();
+    int32_t char_count = s->GetLength();
+    int32_t offset = s->GetOffset();
+    jchar* bytes = new jchar[char_count + 1];
+    for (int32_t i = 0; i < char_count; i++) {
+      bytes[i] = chars->Get(i + offset);
+    }
+    bytes[char_count] = '\0';
+    return bytes;
   }
 
-  static void ReleaseStringChars(JNIEnv* env, jstring java_string, const jchar*) {
+  static void ReleaseStringChars(JNIEnv* env, jstring java_string, const jchar* chars) {
     CHECK_NON_NULL_ARGUMENT(GetStringUTFRegion, java_string);
+    delete[] chars;
     ScopedObjectAccess soa(env);
     UnpinPrimitiveArray(soa, soa.Decode<String*>(java_string)->GetCharArray());
   }
@@ -2105,32 +2134,51 @@ class JNI {
     return NewPrimitiveArray<jlongArray, LongArray>(soa, length);
   }
 
-  static jobjectArray NewObjectArray(JNIEnv* env, jsize length, jclass element_jclass, jobject initial_element) {
-    if (length < 0) {
+  static jobjectArray NewObjectArray(JNIEnv* env, jsize length, jclass element_jclass,
+                                     jobject initial_element) {
+    if (UNLIKELY(length < 0)) {
       JniAbortF("NewObjectArray", "negative array length: %d", length);
+      return nullptr;
     }
 
     // Compute the array class corresponding to the given element class.
     ScopedObjectAccess soa(env);
-    Class* element_class = soa.Decode<Class*>(element_jclass);
-    std::string descriptor;
-    descriptor += "[";
-    descriptor += ClassHelper(element_class).GetDescriptor();
+    Class* array_class;
+    {
+      Class* element_class = soa.Decode<Class*>(element_jclass);
+      if (UNLIKELY(element_class->IsPrimitive())) {
+        JniAbortF("NewObjectArray", "not an object type: %s",
+                  PrettyDescriptor(element_class).c_str());
+        return nullptr;
+      }
+      std::string descriptor("[");
+      descriptor += ClassHelper(element_class).GetDescriptor();
 
-    // Find the class.
-    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    Class* array_class = class_linker->FindClass(descriptor.c_str(),
-                                                 element_class->GetClassLoader());
-    if (array_class == NULL) {
-      return NULL;
+      // Find the class.
+      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+      SirtRef<mirror::ClassLoader> class_loader(soa.Self(), element_class->GetClassLoader());
+      array_class = class_linker->FindClass(descriptor.c_str(), class_loader);
+      if (UNLIKELY(array_class == nullptr)) {
+        return nullptr;
+      }
     }
 
     // Allocate and initialize if necessary.
     ObjectArray<Object>* result = ObjectArray<Object>::Alloc(soa.Self(), array_class, length);
-    if (initial_element != NULL) {
+    if (result != nullptr && initial_element != nullptr) {
       Object* initial_object = soa.Decode<Object*>(initial_element);
-      for (jsize i = 0; i < length; ++i) {
-        result->Set(i, initial_object);
+      if (initial_object != nullptr) {
+        mirror::Class* element_class = result->GetClass()->GetComponentType();
+        if (UNLIKELY(!element_class->IsAssignableFrom(initial_object->GetClass()))) {
+          JniAbortF("NewObjectArray", "cannot assign object of type '%s' to array with element "
+                    "type of '%s'", PrettyDescriptor(initial_object->GetClass()).c_str(),
+                    PrettyDescriptor(element_class).c_str());
+
+        } else {
+          for (jsize i = 0; i < length; ++i) {
+            result->SetWithoutChecks(i, initial_object);
+          }
+        }
       }
     }
     return soa.AddLocalReference<jobjectArray>(result);
@@ -2145,16 +2193,23 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(GetPrimitiveArrayCritical, java_array);
     ScopedObjectAccess soa(env);
     Array* array = soa.Decode<Array*>(java_array);
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    if (heap->IsMovableObject(array)) {
+      heap->IncrementDisableGC(soa.Self());
+      // Re-decode in case the object moved since IncrementDisableGC waits for GC to complete.
+      array = soa.Decode<Array*>(java_array);
+    }
     PinPrimitiveArray(soa, array);
-    if (is_copy != NULL) {
+    if (is_copy != nullptr) {
       *is_copy = JNI_FALSE;
     }
-    return array->GetRawData(array->GetClass()->GetComponentSize());
+    void* address = array->GetRawData(array->GetClass()->GetComponentSize());;
+    return address;
   }
 
-  static void ReleasePrimitiveArrayCritical(JNIEnv* env, jarray array, void*, jint mode) {
+  static void ReleasePrimitiveArrayCritical(JNIEnv* env, jarray array, void* elements, jint mode) {
     CHECK_NON_NULL_ARGUMENT(ReleasePrimitiveArrayCritical, array);
-    ReleasePrimitiveArray(env, array, mode);
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
   static jboolean* GetBooleanArrayElements(JNIEnv* env, jbooleanArray array, jboolean* is_copy) {
@@ -2205,36 +2260,40 @@ class JNI {
     return GetPrimitiveArray<jshortArray, jshort*, ShortArray>(soa, array, is_copy);
   }
 
-  static void ReleaseBooleanArrayElements(JNIEnv* env, jbooleanArray array, jboolean*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseBooleanArrayElements(JNIEnv* env, jbooleanArray array, jboolean* elements,
+                                          jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
-  static void ReleaseByteArrayElements(JNIEnv* env, jbyteArray array, jbyte*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseByteArrayElements(JNIEnv* env, jbyteArray array, jbyte* elements, jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
-  static void ReleaseCharArrayElements(JNIEnv* env, jcharArray array, jchar*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseCharArrayElements(JNIEnv* env, jcharArray array, jchar* elements, jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
-  static void ReleaseDoubleArrayElements(JNIEnv* env, jdoubleArray array, jdouble*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseDoubleArrayElements(JNIEnv* env, jdoubleArray array, jdouble* elements,
+                                         jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
-  static void ReleaseFloatArrayElements(JNIEnv* env, jfloatArray array, jfloat*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseFloatArrayElements(JNIEnv* env, jfloatArray array, jfloat* elements,
+                                        jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
-  static void ReleaseIntArrayElements(JNIEnv* env, jintArray array, jint*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseIntArrayElements(JNIEnv* env, jintArray array, jint* elements, jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
-  static void ReleaseLongArrayElements(JNIEnv* env, jlongArray array, jlong*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseLongArrayElements(JNIEnv* env, jlongArray array, jlong* elements, jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
-  static void ReleaseShortArrayElements(JNIEnv* env, jshortArray array, jshort*, jint mode) {
-    ReleasePrimitiveArray(env, array, mode);
+  static void ReleaseShortArrayElements(JNIEnv* env, jshortArray array, jshort* elements,
+                                        jint mode) {
+    ReleasePrimitiveArray(env, array, elements, mode);
   }
 
   static void GetBooleanArrayRegion(JNIEnv* env, jbooleanArray array, jsize start, jsize length,
@@ -2356,9 +2415,9 @@ class JNI {
     for (jint i = 0; i < method_count; ++i) {
       const char* name = methods[i].name;
       const char* sig = methods[i].signature;
-
+      bool is_fast = false;
       if (*sig == '!') {
-        // TODO: fast jni. it's too noisy to log all these.
+        is_fast = true;
         ++sig;
       }
 
@@ -2381,7 +2440,7 @@ class JNI {
 
       VLOG(jni) << "[Registering JNI native method " << PrettyMethod(m) << "]";
 
-      m->RegisterNative(soa.Self(), methods[i].fnPtr);
+      m->RegisterNative(soa.Self(), methods[i].fnPtr, is_fast);
     }
     return JNI_OK;
   }
@@ -2537,8 +2596,9 @@ class JNI {
   template<typename JniT, typename ArtT>
   static JniT NewPrimitiveArray(const ScopedObjectAccess& soa, jsize length)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    if (length < 0) {
+    if (UNLIKELY(length < 0)) {
       JniAbortF("NewPrimitiveArray", "negative array length: %d", length);
+      return nullptr;
     }
     ArtT* result = ArtT::Alloc(soa.Self(), length);
     return soa.AddLocalReference<JniT>(result);
@@ -2550,19 +2610,49 @@ class JNI {
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     ArtArrayT* array = soa.Decode<ArtArrayT*>(java_array);
     PinPrimitiveArray(soa, array);
-    if (is_copy != NULL) {
-      *is_copy = JNI_FALSE;
+    // Only make a copy if necessary.
+    if (Runtime::Current()->GetHeap()->IsMovableObject(array)) {
+      if (is_copy != nullptr) {
+        *is_copy = JNI_TRUE;
+      }
+      static const size_t component_size = array->GetClass()->GetComponentSize();
+      size_t size = array->GetLength() * component_size;
+      void* data = new uint64_t[RoundUp(size, 8) / 8];
+      memcpy(data, array->GetData(), size);
+      return reinterpret_cast<CArrayT>(data);
+    } else {
+      if (is_copy != nullptr) {
+        *is_copy = JNI_FALSE;
+      }
+      return reinterpret_cast<CArrayT>(array->GetData());
     }
-    return array->GetData();
   }
 
-  template <typename ArrayT>
-  static void ReleasePrimitiveArray(JNIEnv* env, ArrayT java_array, jint mode) {
-    if (mode != JNI_COMMIT) {
-      ScopedObjectAccess soa(env);
-      Array* array = soa.Decode<Array*>(java_array);
-      UnpinPrimitiveArray(soa, array);
+  template <typename ArrayT, typename ElementT>
+  static void ReleasePrimitiveArray(JNIEnv* env, ArrayT java_array, ElementT* elements, jint mode) {
+    ScopedObjectAccess soa(env);
+    Array* array = soa.Decode<Array*>(java_array);
+    size_t component_size = array->GetClass()->GetComponentSize();
+    void* array_data = array->GetRawData(component_size);
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    bool is_copy = array_data != reinterpret_cast<void*>(elements);
+    size_t bytes = array->GetLength() * component_size;
+    VLOG(heap) << "Release primitive array " << env << " array_data " << array_data
+               << " elements " << reinterpret_cast<void*>(elements);
+    if (!is_copy && heap->IsMovableObject(array)) {
+      heap->DecrementDisableGC(soa.Self());
     }
+    // Don't need to copy if we had a direct pointer.
+    if (mode != JNI_ABORT && is_copy) {
+      memcpy(array_data, elements, bytes);
+    }
+    if (mode != JNI_COMMIT) {
+      if (is_copy) {
+        delete[] reinterpret_cast<uint64_t*>(elements);
+      }
+    }
+    // TODO: Do we always unpin primitive array?
+    UnpinPrimitiveArray(soa, array);
   }
 
   template <typename JavaArrayT, typename JavaT, typename ArrayT>
@@ -2853,6 +2943,18 @@ JNIEnvExt::JNIEnvExt(Thread* self, JavaVMExt* vm)
 JNIEnvExt::~JNIEnvExt() {
 }
 
+jobject JNIEnvExt::NewLocalRef(mirror::Object* obj) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  if (obj == nullptr) {
+    return nullptr;
+  }
+  return reinterpret_cast<jobject>(locals.Add(local_ref_cookie, obj));
+}
+
+void JNIEnvExt::DeleteLocalRef(jobject obj) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+  if (obj != nullptr) {
+    locals.Remove(local_ref_cookie, reinterpret_cast<IndirectRef>(obj));
+  }
+}
 void JNIEnvExt::SetCheckJniEnabled(bool enabled) {
   check_jni = enabled;
   functions = enabled ? GetCheckJniNativeInterface() : &gJniNativeInterface;
@@ -3081,15 +3183,6 @@ void JavaVMExt::AllowNewWeakGlobals() {
   weak_globals_add_condition_.Broadcast(self);
 }
 
-void JavaVMExt::SweepWeakGlobals(IsMarkedTester is_marked, void* arg) {
-  MutexLock mu(Thread::Current(), weak_globals_lock_);
-  for (const Object** entry : weak_globals_) {
-    if (!is_marked(*entry, arg)) {
-      *entry = kClearedJniWeakGlobal;
-    }
-  }
-}
-
 mirror::Object* JavaVMExt::DecodeWeakGlobal(Thread* self, IndirectRef ref) {
   MutexLock mu(self, weak_globals_lock_);
   while (UNLIKELY(!allow_new_weak_globals_)) {
@@ -3115,8 +3208,8 @@ void JavaVMExt::DumpReferenceTables(std::ostream& os) {
 }
 
 bool JavaVMExt::LoadNativeLibrary(const std::string& path, ClassLoader* class_loader,
-                                  std::string& detail) {
-  detail.clear();
+                                  std::string* detail) {
+  detail->clear();
 
   // See if we've already loaded this library.  If we have, and the class loader
   // matches, return successfully without doing anything.
@@ -3134,7 +3227,7 @@ bool JavaVMExt::LoadNativeLibrary(const std::string& path, ClassLoader* class_lo
       // The library will be associated with class_loader. The JNI
       // spec says we can't load the same library into more than one
       // class loader.
-      StringAppendF(&detail, "Shared library \"%s\" already opened by "
+      StringAppendF(detail, "Shared library \"%s\" already opened by "
           "ClassLoader %p; can't open in ClassLoader %p",
           path.c_str(), library->GetClassLoader(), class_loader);
       LOG(WARNING) << detail;
@@ -3143,7 +3236,7 @@ bool JavaVMExt::LoadNativeLibrary(const std::string& path, ClassLoader* class_lo
     VLOG(jni) << "[Shared library \"" << path << "\" already loaded in "
               << "ClassLoader " << class_loader << "]";
     if (!library->CheckOnLoadResult()) {
-      StringAppendF(&detail, "JNI_OnLoad failed on a previous attempt "
+      StringAppendF(detail, "JNI_OnLoad failed on a previous attempt "
           "to load \"%s\"", path.c_str());
       return false;
     }
@@ -3170,7 +3263,7 @@ bool JavaVMExt::LoadNativeLibrary(const std::string& path, ClassLoader* class_lo
   VLOG(jni) << "[Call to dlopen(\"" << path << "\", RTLD_LAZY) returned " << handle << "]";
 
   if (handle == NULL) {
-    detail = dlerror();
+    *detail = dlerror();
     LOG(ERROR) << "dlopen(\"" << path << "\", RTLD_LAZY) failed: " << detail;
     return false;
   }
@@ -3207,7 +3300,7 @@ bool JavaVMExt::LoadNativeLibrary(const std::string& path, ClassLoader* class_lo
     // the comments in the JNI FindClass function.)
     typedef int (*JNI_OnLoadFn)(JavaVM*, void*);
     JNI_OnLoadFn jni_on_load = reinterpret_cast<JNI_OnLoadFn>(sym);
-    ClassLoader* old_class_loader = self->GetClassLoaderOverride();
+    SirtRef<ClassLoader> old_class_loader(self, self->GetClassLoaderOverride());
     self->SetClassLoaderOverride(class_loader);
 
     int version = 0;
@@ -3217,12 +3310,12 @@ bool JavaVMExt::LoadNativeLibrary(const std::string& path, ClassLoader* class_lo
       version = (*jni_on_load)(this, NULL);
     }
 
-    self->SetClassLoaderOverride(old_class_loader);
+    self->SetClassLoaderOverride(old_class_loader.get());
 
     if (version == JNI_ERR) {
-      StringAppendF(&detail, "JNI_ERR returned from JNI_OnLoad in \"%s\"", path.c_str());
+      StringAppendF(detail, "JNI_ERR returned from JNI_OnLoad in \"%s\"", path.c_str());
     } else if (IsBadJniVersion(version)) {
-      StringAppendF(&detail, "Bad JNI version returned from JNI_OnLoad in \"%s\": %d",
+      StringAppendF(detail, "Bad JNI version returned from JNI_OnLoad in \"%s\": %d",
                     path.c_str(), version);
       // It's unwise to call dlclose() here, but we can mark it
       // as bad and ensure that future load attempts will fail.
@@ -3249,8 +3342,9 @@ void* JavaVMExt::FindCodeForNativeMethod(ArtMethod* m) {
   // If this is a static method, it could be called before the class
   // has been initialized.
   if (m->IsStatic()) {
-    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(c, true, true)) {
-      return NULL;
+    c = EnsureInitialized(Thread::Current(), c);
+    if (c == nullptr) {
+      return nullptr;
     }
   } else {
     CHECK(c->IsInitializing()) << c->GetStatus() << " " << PrettyMethod(m);
@@ -3269,6 +3363,18 @@ void* JavaVMExt::FindCodeForNativeMethod(ArtMethod* m) {
     self->ThrowNewException(throw_location, "Ljava/lang/UnsatisfiedLinkError;", detail.c_str());
   }
   return native_method;
+}
+
+void JavaVMExt::SweepJniWeakGlobals(RootVisitor visitor, void* arg) {
+  MutexLock mu(Thread::Current(), weak_globals_lock_);
+  for (mirror::Object** entry : weak_globals_) {
+    mirror::Object* obj = *entry;
+    mirror::Object* new_obj = visitor(obj, arg);
+    if (new_obj == nullptr) {
+      new_obj = kClearedJniWeakGlobal;
+    }
+    *entry = new_obj;
+  }
 }
 
 void JavaVMExt::VisitRoots(RootVisitor* visitor, void* arg) {

@@ -19,6 +19,7 @@
 #include "dex_file-inl.h"
 #include "dex_instruction-inl.h"
 #include "entrypoints/entrypoint_utils.h"
+#include "gc/accounting/card_table-inl.h"
 #include "interpreter/interpreter.h"
 #include "invoke_arg_array_builder.h"
 #include "mirror/art_method-inl.h"
@@ -297,8 +298,8 @@ extern "C" uint64_t artQuickToInterpreterBridge(mirror::ArtMethod* method, Threa
 
     if (method->IsStatic() && !method->GetDeclaringClass()->IsInitializing()) {
       // Ensure static method's class is initialized.
-      if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(method->GetDeclaringClass(),
-                                                                   true, true)) {
+      SirtRef<mirror::Class> sirt_c(self, method->GetDeclaringClass());
+      if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(sirt_c, true, true)) {
         DCHECK(Thread::Current()->IsExceptionPending());
         self->PopManagedStackFragment(fragment);
         return 0;
@@ -415,22 +416,32 @@ extern "C" uint64_t artQuickProxyInvokeHandler(mirror::ArtMethod* proxy_method,
 
 // Read object references held in arguments from quick frames and place in a JNI local references,
 // so they don't get garbage collected.
-class RememberFoGcArgumentVisitor : public QuickArgumentVisitor {
+class RememberForGcArgumentVisitor : public QuickArgumentVisitor {
  public:
-  RememberFoGcArgumentVisitor(mirror::ArtMethod** sp, bool is_static, const char* shorty,
-                              uint32_t shorty_len, ScopedObjectAccessUnchecked* soa) :
+  RememberForGcArgumentVisitor(mirror::ArtMethod** sp, bool is_static, const char* shorty,
+                               uint32_t shorty_len, ScopedObjectAccessUnchecked* soa) :
     QuickArgumentVisitor(sp, is_static, shorty, shorty_len), soa_(soa) {}
 
   virtual void Visit() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
     if (IsParamAReference()) {
-      soa_->AddLocalReference<jobject>(*reinterpret_cast<mirror::Object**>(GetParamAddress()));
+      mirror::Object** param_address = reinterpret_cast<mirror::Object**>(GetParamAddress());
+      jobject reference =
+          soa_->AddLocalReference<jobject>(*param_address);
+      references_.push_back(std::make_pair(reference, param_address));
+    }
+  }
+
+  void FixupReferences() SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+    // Fixup any references which may have changed.
+    for (std::pair<jobject, mirror::Object**>& it : references_) {
+      *it.second = soa_->Decode<mirror::Object*>(it.first);
     }
   }
 
  private:
   ScopedObjectAccessUnchecked* soa_;
-
-  DISALLOW_COPY_AND_ASSIGN(RememberFoGcArgumentVisitor);
+  std::vector<std::pair<jobject, mirror::Object**> > references_;
+  DISALLOW_COPY_AND_ASSIGN(RememberForGcArgumentVisitor);
 };
 
 // Lazily resolve a method for quick. Called by stub code.
@@ -520,7 +531,7 @@ extern "C" const void* artQuickResolutionTrampoline(mirror::ArtMethod* called,
   uint32_t shorty_len;
   const char* shorty =
       dex_file->GetMethodShorty(dex_file->GetMethodId(dex_method_idx), &shorty_len);
-  RememberFoGcArgumentVisitor visitor(sp, invoke_type == kStatic, shorty, shorty_len, &soa);
+  RememberForGcArgumentVisitor visitor(sp, invoke_type == kStatic, shorty, shorty_len, &soa);
   visitor.VisitArguments();
   thread->EndAssertNoThreadSuspension(old_cause);
   // Resolve method filling in dex cache.
@@ -537,8 +548,23 @@ extern "C" const void* artQuickResolutionTrampoline(mirror::ArtMethod* called,
     } else if (invoke_type == kInterface) {
       called = receiver->GetClass()->FindVirtualMethodForInterface(called);
     }
+    if ((invoke_type == kVirtual) || (invoke_type == kInterface)) {
+      // We came here because of sharpening. Ensure the dex cache is up-to-date on the method index
+      // of the sharpened method.
+      if (called->GetDexCacheResolvedMethods() == caller->GetDexCacheResolvedMethods()) {
+        caller->GetDexCacheResolvedMethods()->Set(called->GetDexMethodIndex(), called);
+      } else {
+        // Calling from one dex file to another, need to compute the method index appropriate to
+        // the caller's dex file.
+        uint32_t method_index =
+            MethodHelper(called).FindDexMethodIndexInOtherDexFile(MethodHelper(caller).GetDexFile());
+        if (method_index != DexFile::kDexNoIndex) {
+          caller->GetDexCacheResolvedMethods()->Set(method_index, called);
+        }
+      }
+    }
     // Ensure that the called method's class is initialized.
-    mirror::Class* called_class = called->GetDeclaringClass();
+    SirtRef<mirror::Class> called_class(soa.Self(), called->GetDeclaringClass());
     linker->EnsureInitialized(called_class, true, true);
     if (LIKELY(called_class->IsInitialized())) {
       code = called->GetEntryPointFromCompiledCode();
@@ -556,11 +582,8 @@ extern "C" const void* artQuickResolutionTrampoline(mirror::ArtMethod* called,
     }
   }
   CHECK_EQ(code == NULL, thread->IsExceptionPending());
-#ifdef MOVING_GARBAGE_COLLECTOR
-  // TODO: locally saved objects may have moved during a GC during resolution. Need to update the
-  //       registers so that the stale objects aren't passed to the method we've resolved.
-    UNIMPLEMENTED(WARNING);
-#endif
+  // Fixup any locally saved objects may have moved during a GC.
+  visitor.FixupReferences();
   // Place called method in callee-save frame to be placed as first argument to quick method.
   *sp = called;
   return code;

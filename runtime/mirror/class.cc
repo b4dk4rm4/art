@@ -50,9 +50,16 @@ void Class::ResetClass() {
   java_lang_Class_ = NULL;
 }
 
+void Class::VisitRoots(RootVisitor* visitor, void* arg) {
+  if (java_lang_Class_ != nullptr) {
+    java_lang_Class_ = down_cast<Class*>(visitor(java_lang_Class_, arg));
+  }
+}
+
 void Class::SetStatus(Status new_status, Thread* self) {
   Status old_status = GetStatus();
-  bool class_linker_initialized = Runtime::Current()->GetClassLinker() != nullptr;
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  bool class_linker_initialized = class_linker != nullptr && class_linker->IsInitialized();
   if (LIKELY(class_linker_initialized)) {
     if (UNLIKELY(new_status <= old_status && new_status != kStatusError)) {
       LOG(FATAL) << "Unexpected change back of class status for " << PrettyClass(this) << " "
@@ -60,7 +67,7 @@ void Class::SetStatus(Status new_status, Thread* self) {
     }
     if (new_status >= kStatusResolved || old_status >= kStatusResolved) {
       // When classes are being resolved the resolution code should hold the lock.
-      CHECK_EQ(GetThinLockId(), self->GetThinLockId())
+      CHECK_EQ(GetLockOwnerThreadId(), self->GetThreadId())
             << "Attempt to change status of class while not holding its lock: "
             << PrettyClass(this) << " " << old_status << " -> " << new_status;
     }
@@ -118,15 +125,6 @@ void Class::SetDexCache(DexCache* new_dex_cache) {
   SetFieldObject(OFFSET_OF_OBJECT_MEMBER(Class, dex_cache_), new_dex_cache, false);
 }
 
-Object* Class::AllocObject(Thread* self) {
-  DCHECK(!IsArrayClass()) << PrettyClass(this);
-  DCHECK(IsInstantiable()) << PrettyClass(this);
-  // TODO: decide whether we want this check. It currently fails during bootstrap.
-  // DCHECK(!Runtime::Current()->IsStarted() || IsInitializing()) << PrettyClass(this);
-  DCHECK_GE(this->object_size_, sizeof(Object));
-  return Runtime::Current()->GetHeap()->AllocObject(self, this, this->object_size_);
-}
-
 void Class::SetClassSize(size_t new_class_size) {
   if (kIsDebugBuild && (new_class_size < GetClassSize())) {
     DumpClass(LOG(ERROR), kDumpClassFullDetail);
@@ -141,9 +139,11 @@ void Class::SetClassSize(size_t new_class_size) {
 // slashes (so "java.lang.String" but "[Ljava.lang.String;"). Madness.
 String* Class::ComputeName() {
   String* name = GetName();
-  if (name != NULL) {
+  if (name != nullptr) {
     return name;
   }
+  Thread* self = Thread::Current();
+  SirtRef<mirror::Class> sirt_c(self, this);
   std::string descriptor(ClassHelper(this).GetDescriptor());
   if ((descriptor[0] != 'L') && (descriptor[0] != '[')) {
     // The descriptor indicates that this is the class for
@@ -162,7 +162,7 @@ String* Class::ComputeName() {
     default:
       LOG(FATAL) << "Unknown primitive type: " << PrintableChar(descriptor[0]);
     }
-    name = String::AllocFromModifiedUtf8(Thread::Current(), c_name);
+    name = String::AllocFromModifiedUtf8(self, c_name);
   } else {
     // Convert the UTF-8 name to a java.lang.String. The name must use '.' to separate package
     // components.
@@ -171,9 +171,9 @@ String* Class::ComputeName() {
       descriptor.erase(descriptor.size() - 1);
     }
     std::replace(descriptor.begin(), descriptor.end(), '/', '.');
-    name = String::AllocFromModifiedUtf8(Thread::Current(), descriptor.c_str());
+    name = String::AllocFromModifiedUtf8(self, descriptor.c_str());
   }
-  SetName(name);
+  sirt_c->SetName(name);
   return name;
 }
 
@@ -334,7 +334,7 @@ void Class::SetClassLoader(ClassLoader* new_class_loader) {
   SetFieldObject(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader, false);
 }
 
-ArtMethod* Class::FindInterfaceMethod(const StringPiece& name, const StringPiece& signature) const {
+ArtMethod* Class::FindInterfaceMethod(const StringPiece& name, const Signature& signature) const {
   // Check the current class before checking the interfaces.
   ArtMethod* method = FindDeclaredVirtualMethod(name, signature);
   if (method != NULL) {
@@ -370,8 +370,19 @@ ArtMethod* Class::FindInterfaceMethod(const DexCache* dex_cache, uint32_t dex_me
   return NULL;
 }
 
-
 ArtMethod* Class::FindDeclaredDirectMethod(const StringPiece& name, const StringPiece& signature) const {
+  MethodHelper mh;
+  for (size_t i = 0; i < NumDirectMethods(); ++i) {
+    ArtMethod* method = GetDirectMethod(i);
+    mh.ChangeMethod(method);
+    if (name == mh.GetName() && mh.GetSignature() == signature) {
+      return method;
+    }
+  }
+  return NULL;
+}
+
+ArtMethod* Class::FindDeclaredDirectMethod(const StringPiece& name, const Signature& signature) const {
   MethodHelper mh;
   for (size_t i = 0; i < NumDirectMethods(); ++i) {
     ArtMethod* method = GetDirectMethod(i);
@@ -405,6 +416,16 @@ ArtMethod* Class::FindDirectMethod(const StringPiece& name, const StringPiece& s
   return NULL;
 }
 
+ArtMethod* Class::FindDirectMethod(const StringPiece& name, const Signature& signature) const {
+  for (const Class* klass = this; klass != NULL; klass = klass->GetSuperClass()) {
+    ArtMethod* method = klass->FindDeclaredDirectMethod(name, signature);
+    if (method != NULL) {
+      return method;
+    }
+  }
+  return NULL;
+}
+
 ArtMethod* Class::FindDirectMethod(const DexCache* dex_cache, uint32_t dex_method_idx) const {
   for (const Class* klass = this; klass != NULL; klass = klass->GetSuperClass()) {
     ArtMethod* method = klass->FindDeclaredDirectMethod(dex_cache, dex_method_idx);
@@ -415,8 +436,20 @@ ArtMethod* Class::FindDirectMethod(const DexCache* dex_cache, uint32_t dex_metho
   return NULL;
 }
 
+ArtMethod* Class::FindDeclaredVirtualMethod(const StringPiece& name, const StringPiece& signature) const {
+  MethodHelper mh;
+  for (size_t i = 0; i < NumVirtualMethods(); ++i) {
+    ArtMethod* method = GetVirtualMethod(i);
+    mh.ChangeMethod(method);
+    if (name == mh.GetName() && mh.GetSignature() == signature) {
+      return method;
+    }
+  }
+  return NULL;
+}
+
 ArtMethod* Class::FindDeclaredVirtualMethod(const StringPiece& name,
-                                         const StringPiece& signature) const {
+                                            const Signature& signature) const {
   MethodHelper mh;
   for (size_t i = 0; i < NumVirtualMethods(); ++i) {
     ArtMethod* method = GetVirtualMethod(i);
@@ -450,10 +483,36 @@ ArtMethod* Class::FindVirtualMethod(const StringPiece& name, const StringPiece& 
   return NULL;
 }
 
+ArtMethod* Class::FindVirtualMethod(const StringPiece& name, const Signature& signature) const {
+  for (const Class* klass = this; klass != NULL; klass = klass->GetSuperClass()) {
+    ArtMethod* method = klass->FindDeclaredVirtualMethod(name, signature);
+    if (method != NULL) {
+      return method;
+    }
+  }
+  return NULL;
+}
+
 ArtMethod* Class::FindVirtualMethod(const DexCache* dex_cache, uint32_t dex_method_idx) const {
   for (const Class* klass = this; klass != NULL; klass = klass->GetSuperClass()) {
     ArtMethod* method = klass->FindDeclaredVirtualMethod(dex_cache, dex_method_idx);
     if (method != NULL) {
+      return method;
+    }
+  }
+  return NULL;
+}
+
+ArtMethod* Class::FindClassInitializer() const {
+  for (size_t i = 0; i < NumDirectMethods(); ++i) {
+    ArtMethod* method = GetDirectMethod(i);
+    if (method->IsConstructor() && method->IsStatic()) {
+      if (kIsDebugBuild) {
+        MethodHelper mh(method);
+        CHECK(mh.IsClassInitializer());
+        CHECK_STREQ(mh.GetName(), "<clinit>");
+        CHECK_STREQ(mh.GetSignature().ToString().c_str(), "()V");
+      }
       return method;
     }
   }
@@ -538,7 +597,6 @@ ArtField* Class::FindDeclaredStaticField(const DexCache* dex_cache, uint32_t dex
 ArtField* Class::FindStaticField(const StringPiece& name, const StringPiece& type) {
   // Is the field in this class (or its interfaces), or any of its
   // superclasses (or their interfaces)?
-  ClassHelper kh;
   for (Class* k = this; k != NULL; k = k->GetSuperClass()) {
     // Is the field in this class?
     ArtField* f = k->FindDeclaredStaticField(name, type);
@@ -546,7 +604,7 @@ ArtField* Class::FindStaticField(const StringPiece& name, const StringPiece& typ
       return f;
     }
     // Is this field in any of this class' interfaces?
-    kh.ChangeClass(k);
+    ClassHelper kh(k);
     for (uint32_t i = 0; i < kh.NumDirectInterfaces(); ++i) {
       Class* interface = kh.GetDirectInterface(i);
       f = interface->FindStaticField(name, type);
@@ -559,7 +617,6 @@ ArtField* Class::FindStaticField(const StringPiece& name, const StringPiece& typ
 }
 
 ArtField* Class::FindStaticField(const DexCache* dex_cache, uint32_t dex_field_idx) {
-  ClassHelper kh;
   for (Class* k = this; k != NULL; k = k->GetSuperClass()) {
     // Is the field in this class?
     ArtField* f = k->FindDeclaredStaticField(dex_cache, dex_field_idx);
@@ -567,7 +624,7 @@ ArtField* Class::FindStaticField(const DexCache* dex_cache, uint32_t dex_field_i
       return f;
     }
     // Is this field in any of this class' interfaces?
-    kh.ChangeClass(k);
+    ClassHelper kh(k);
     for (uint32_t i = 0; i < kh.NumDirectInterfaces(); ++i) {
       Class* interface = kh.GetDirectInterface(i);
       f = interface->FindStaticField(dex_cache, dex_field_idx);
@@ -581,7 +638,6 @@ ArtField* Class::FindStaticField(const DexCache* dex_cache, uint32_t dex_field_i
 
 ArtField* Class::FindField(const StringPiece& name, const StringPiece& type) {
   // Find a field using the JLS field resolution order
-  ClassHelper kh;
   for (Class* k = this; k != NULL; k = k->GetSuperClass()) {
     // Is the field in this class?
     ArtField* f = k->FindDeclaredInstanceField(name, type);
@@ -593,7 +649,7 @@ ArtField* Class::FindField(const StringPiece& name, const StringPiece& type) {
       return f;
     }
     // Is this field in any of this class' interfaces?
-    kh.ChangeClass(k);
+    ClassHelper kh(k);
     for (uint32_t i = 0; i < kh.NumDirectInterfaces(); ++i) {
       Class* interface = kh.GetDirectInterface(i);
       f = interface->FindStaticField(name, type);
@@ -611,7 +667,9 @@ static void SetPreverifiedFlagOnMethods(mirror::ObjectArray<mirror::ArtMethod>* 
     for (int32_t index = 0, end = methods->GetLength(); index < end; ++index) {
       mirror::ArtMethod* method = methods->GetWithoutChecks(index);
       DCHECK(method != NULL);
-      method->SetPreverified();
+      if (!method->IsNative() && !method->IsAbstract()) {
+        method->SetPreverified();
+      }
     }
   }
 }

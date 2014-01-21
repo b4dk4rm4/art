@@ -44,7 +44,7 @@ std::string SpaceBitmap::Dump() const {
                       reinterpret_cast<void*>(HeapLimit()));
 }
 
-void SpaceSetMap::Walk(SpaceBitmap::Callback* callback, void* arg) {
+void ObjectSet::Walk(SpaceBitmap::Callback* callback, void* arg) {
   for (const mirror::Object* obj : contained_) {
     callback(const_cast<mirror::Object*>(obj), arg);
   }
@@ -62,9 +62,11 @@ SpaceBitmap* SpaceBitmap::Create(const std::string& name, byte* heap_begin, size
   CHECK(heap_begin != NULL);
   // Round up since heap_capacity is not necessarily a multiple of kAlignment * kBitsPerWord.
   size_t bitmap_size = OffsetToIndex(RoundUp(heap_capacity, kAlignment * kBitsPerWord)) * kWordSize;
-  UniquePtr<MemMap> mem_map(MemMap::MapAnonymous(name.c_str(), NULL, bitmap_size, PROT_READ | PROT_WRITE));
-  if (mem_map.get() == NULL) {
-    LOG(ERROR) << "Failed to allocate bitmap " << name;
+  std::string error_msg;
+  UniquePtr<MemMap> mem_map(MemMap::MapAnonymous(name.c_str(), NULL, bitmap_size,
+                                                 PROT_READ | PROT_WRITE, &error_msg));
+  if (UNLIKELY(mem_map.get() == nullptr)) {
+    LOG(ERROR) << "Failed to allocate bitmap " << name << ": " << error_msg;
     return NULL;
   }
   return CreateFromMemMap(name, mem_map.release(), heap_begin, heap_capacity);
@@ -263,18 +265,6 @@ void SpaceBitmap::InOrderWalk(SpaceBitmap::Callback* callback, void* arg) {
       }
     }
   }
-}
-
-std::string SpaceSetMap::GetName() const {
-  return name_;
-}
-
-void SpaceSetMap::SetName(const std::string& name) {
-  name_ = name;
-}
-
-void SpaceSetMap::CopyFrom(const SpaceSetMap& space_set) {
-  contained_ = space_set.contained_;
 }
 
 std::ostream& operator << (std::ostream& stream, const SpaceBitmap& bitmap) {

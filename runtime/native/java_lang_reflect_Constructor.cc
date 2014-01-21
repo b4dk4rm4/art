@@ -35,29 +35,30 @@ namespace art {
  * with an interface, array, or primitive class.
  */
 static jobject Constructor_newInstance(JNIEnv* env, jobject javaMethod, jobjectArray javaArgs) {
+  // TODO: ScopedFastNativeObjectAccess
   ScopedObjectAccess soa(env);
   jobject art_method = soa.Env()->GetObjectField(
       javaMethod, WellKnownClasses::java_lang_reflect_AbstractMethod_artMethod);
 
   mirror::ArtMethod* m = soa.Decode<mirror::Object*>(art_method)->AsArtMethod();
-  mirror::Class* c = m->GetDeclaringClass();
+  SirtRef<mirror::Class> c(soa.Self(), m->GetDeclaringClass());
   if (UNLIKELY(c->IsAbstract())) {
     ThrowLocation throw_location = soa.Self()->GetCurrentLocationForThrow();
     soa.Self()->ThrowNewExceptionF(throw_location, "Ljava/lang/InstantiationException;",
                                    "Can't instantiate %s %s",
                                    c->IsInterface() ? "interface" : "abstract class",
-                                   PrettyDescriptor(c).c_str());
-    return NULL;
+                                   PrettyDescriptor(c.get()).c_str());
+    return nullptr;
   }
 
   if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(c, true, true)) {
     DCHECK(soa.Self()->IsExceptionPending());
-    return NULL;
+    return nullptr;
   }
 
-  mirror::Object* receiver = c->AllocObject(soa.Self());
-  if (receiver == NULL) {
-    return NULL;
+  mirror::Object* receiver = c->AllocNonMovableObject(soa.Self());
+  if (receiver == nullptr) {
+    return nullptr;
   }
 
   jobject javaReceiver = soa.AddLocalReference<jobject>(receiver);
@@ -68,7 +69,7 @@ static jobject Constructor_newInstance(JNIEnv* env, jobject javaMethod, jobjectA
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Constructor, newInstance, "([Ljava/lang/Object;)Ljava/lang/Object;"),
+  NATIVE_METHOD(Constructor, newInstance, "!([Ljava/lang/Object;)Ljava/lang/Object;"),
 };
 
 void register_java_lang_reflect_Constructor(JNIEnv* env) {

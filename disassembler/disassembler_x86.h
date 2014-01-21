@@ -14,38 +14,25 @@
  * limitations under the License.
  */
 
-#ifndef ART_RUNTIME_DISASSEMBLER_ARM_H_
-#define ART_RUNTIME_DISASSEMBLER_ARM_H_
-
-#include <vector>
+#ifndef ART_DISASSEMBLER_DISASSEMBLER_X86_H_
+#define ART_DISASSEMBLER_DISASSEMBLER_X86_H_
 
 #include "disassembler.h"
 
 namespace art {
-namespace arm {
+namespace x86 {
 
-class DisassemblerArm : public Disassembler {
+class DisassemblerX86 : public Disassembler {
  public:
-  DisassemblerArm();
+  DisassemblerX86();
 
   virtual size_t Dump(std::ostream& os, const uint8_t* begin);
   virtual void Dump(std::ostream& os, const uint8_t* begin, const uint8_t* end);
  private:
-  void DumpArm(std::ostream& os, const uint8_t* instr);
-
-  // Returns the size of the instruction just decoded
-  size_t DumpThumb16(std::ostream& os, const uint8_t* instr);
-  size_t DumpThumb32(std::ostream& os, const uint8_t* instr_ptr);
-
-  void DumpBranchTarget(std::ostream& os, const uint8_t* instr_ptr, int32_t imm32);
-  void DumpCond(std::ostream& os, uint32_t cond);
-
-  std::vector<const char*> it_conditions_;
-
-  DISALLOW_COPY_AND_ASSIGN(DisassemblerArm);
+  size_t DumpInstruction(std::ostream& os, const uint8_t* instr);
 };
 
-}  // namespace arm
+}  // namespace x86
 }  // namespace art
 
-#endif  // ART_RUNTIME_DISASSEMBLER_ARM_H_
+#endif  // ART_DISASSEMBLER_DISASSEMBLER_X86_H_

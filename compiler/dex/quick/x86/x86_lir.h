@@ -128,11 +128,11 @@ namespace art {
 #define X86_FP_REG_MASK 0xF
 
 // RegisterLocation templates return values (rAX, rAX/rDX or XMM0).
-//                               location,     wide, defined, const, fp, core, ref, high_word, home, low_reg, high_reg,     s_reg_low
-#define X86_LOC_C_RETURN             {kLocPhysReg, 0,    0,       0,     0,  0,    0,   0,        1,    rAX,    INVALID_REG, INVALID_SREG, INVALID_SREG}
-#define X86_LOC_C_RETURN_WIDE        {kLocPhysReg, 1,    0,       0,     0,  0,    0,   0,        1,    rAX,    rDX,         INVALID_SREG, INVALID_SREG}
-#define X86_LOC_C_RETURN_FLOAT       {kLocPhysReg, 0,    0,       0,     1,  0,    0,   0,        1,    fr0,    INVALID_REG, INVALID_SREG, INVALID_SREG}
-#define X86_LOC_C_RETURN_DOUBLE      {kLocPhysReg, 1,    0,       0,     1,  0,    0,   0,        1,    fr0,    fr1,         INVALID_SREG, INVALID_SREG}
+//                               location,     wide, defined, const, fp, core, ref, high_word, home, vec_len, low_reg, high_reg,     s_reg_low
+#define X86_LOC_C_RETURN             {kLocPhysReg, 0,    0,       0,     0,  0,    0,   0,        1,    kVectorNotUsed, rAX,    INVALID_REG, INVALID_SREG, INVALID_SREG}
+#define X86_LOC_C_RETURN_WIDE        {kLocPhysReg, 1,    0,       0,     0,  0,    0,   0,        1,    kVectorNotUsed, rAX,    rDX,         INVALID_SREG, INVALID_SREG}
+#define X86_LOC_C_RETURN_FLOAT       {kLocPhysReg, 0,    0,       0,     1,  0,    0,   0,        1,    kVectorLength4, fr0,    INVALID_REG, INVALID_SREG, INVALID_SREG}
+#define X86_LOC_C_RETURN_DOUBLE      {kLocPhysReg, 1,    0,       0,     1,  0,    0,   0,        1,    kVectorLength8, fr0,    fr0,         INVALID_SREG, INVALID_SREG}
 
 enum X86ResourceEncodingPos {
   kX86GPReg0   = 0,
@@ -243,7 +243,7 @@ enum X86OpCode {
   //             - lir operands - 0: base, 1: disp, 2: immediate
   // AI - Array Immediate  - opcode [base + index * scale + disp], #immediate
   //             - lir operands - 0: base, 1: index, 2: scale, 3: disp 4: immediate
-  // TI - Thread Register  - opcode fs:[disp], imm - where fs: is equal to Thread::Current()
+  // TI - Thread Immediate  - opcode fs:[disp], imm - where fs: is equal to Thread::Current()
   //             - lir operands - 0: disp, 1: imm
 #define BinaryOpCode(opcode) \
   opcode ## 8MR, opcode ## 8AR, opcode ## 8TR, \
@@ -279,6 +279,9 @@ enum X86OpCode {
   kX86Mov32RR, kX86Mov32RM, kX86Mov32RA, kX86Mov32RT,
   kX86Mov32RI, kX86Mov32MI, kX86Mov32AI, kX86Mov32TI,
   kX86Lea32RA,
+  // RRC - Register Register ConditionCode - cond_opcode reg1, reg2
+  //             - lir operands - 0: reg1, 1: reg2, 2: CC
+  kX86Cmov32RRC,
   // RC - Register CL - opcode reg, CL
   //          - lir operands - 0: reg, 1: CL
   // MC - Memory CL   - opcode [base + disp], CL
@@ -313,6 +316,8 @@ enum X86OpCode {
   UnaryOpcode(kX86Imul, DaR, DaM, DaA),
   UnaryOpcode(kX86Divmod,  DaR, DaM, DaA),
   UnaryOpcode(kX86Idivmod, DaR, DaM, DaA),
+  kX86Bswap32R,
+  kX86Push32R, kX86Pop32R,
 #undef UnaryOpcode
 #define Binary0fOpCode(opcode) \
   opcode ## RR, opcode ## RM, opcode ## RA
@@ -346,6 +351,8 @@ enum X86OpCode {
   Binary0fOpCode(kX86Divss),    // float divide
   kX86PsrlqRI,                  // right shift of floating point registers
   kX86PsllqRI,                  // left shift of floating point registers
+  kX86SqrtsdRR,                 // sqrt of floating point register
+  kX86FstpdM,                   // Store and pop top x87 fp stack
   Binary0fOpCode(kX86Movdxr),   // move into xmm from gpr
   kX86MovdrxRR, kX86MovdrxMR, kX86MovdrxAR,  // move into reg from xmm
   kX86Set8R, kX86Set8M, kX86Set8A,  // set byte depending on condition operand
@@ -353,7 +360,8 @@ enum X86OpCode {
   Binary0fOpCode(kX86Imul16),   // 16bit multiply
   Binary0fOpCode(kX86Imul32),   // 32bit multiply
   kX86CmpxchgRR, kX86CmpxchgMR, kX86CmpxchgAR,  // compare and exchange
-  kX86LockCmpxchgRR, kX86LockCmpxchgMR, kX86LockCmpxchgAR,  // locked compare and exchange
+  kX86LockCmpxchgMR, kX86LockCmpxchgAR,  // locked compare and exchange
+  kX86LockCmpxchg8bM, kX86LockCmpxchg8bA,  // locked compare and exchange
   Binary0fOpCode(kX86Movzx8),   // zero-extend 8-bit value
   Binary0fOpCode(kX86Movzx16),  // zero-extend 16-bit value
   Binary0fOpCode(kX86Movsx8),   // sign-extend 8-bit value
@@ -381,6 +389,7 @@ enum X86EncodingKind {
   kData,                                   // Special case for raw data.
   kNop,                                    // Special case for variable length nop.
   kNullary,                                // Opcode that takes no arguments.
+  kRegOpcode,                              // Shorter form of R instruction kind (opcode+rd)
   kReg, kMem, kArray,                      // R, M and A instruction kinds.
   kMemReg, kArrayReg, kThreadReg,          // MR, AR and TR instruction kinds.
   kRegReg, kRegMem, kRegArray, kRegThread,  // RR, RM, RA and RT instruction kinds.
@@ -392,6 +401,7 @@ enum X86EncodingKind {
   kShiftRegCl, kShiftMemCl, kShiftArrayCl,     // Shift opcode with register CL.
   kRegRegReg, kRegRegMem, kRegRegArray,    // RRR, RRM, RRA instruction kinds.
   kRegCond, kMemCond, kArrayCond,          // R, M, A instruction kinds following by a condition.
+  kRegRegCond,                             // RR instruction kind followed by a condition.
   kJmp, kJcc, kCall,                       // Branch instruction kinds.
   kPcRel,                                  // Operation with displacement that is PC relative
   kMacro,                                  // An instruction composing multiple others

@@ -484,11 +484,11 @@ class Hprof {
   }
 
  private:
-  static void RootVisitor(const mirror::Object* obj, void* arg)
+  static mirror::Object* RootVisitor(mirror::Object* obj, void* arg)
       SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-    CHECK(arg != NULL);
-    Hprof* hprof = reinterpret_cast<Hprof*>(arg);
-    hprof->VisitRoot(obj);
+    DCHECK(arg != NULL);
+    reinterpret_cast<Hprof*>(arg)->VisitRoot(obj);
+    return obj;
   }
 
   static void HeapBitmapCallback(mirror::Object* obj, void* arg)
@@ -537,7 +537,7 @@ class Hprof {
     HprofRecord* rec = &current_record_;
 
     for (StringMapIterator it = strings_.begin(); it != strings_.end(); ++it) {
-      std::string string((*it).first);
+      const std::string& string = (*it).first;
       size_t id = (*it).second;
 
       int err = current_record_.StartNewRecord(header_fp_, HPROF_TAG_STRING, HPROF_TIME);

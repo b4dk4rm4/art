@@ -15,6 +15,9 @@
  */
 
 #include "dex/compiler_ir.h"
+#include "dex/frontend.h"
+#include "dex/quick/dex_file_method_inliner.h"
+#include "dex/quick/dex_file_to_method_inliner_map.h"
 #include "dex_file-inl.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "invoke_type.h"
@@ -59,14 +62,14 @@ LIR* Mir2Lir::CallHelper(int r_tgt, ThreadOffset helper_offset, bool safepoint_p
 void Mir2Lir::CallRuntimeHelperImm(ThreadOffset helper_offset, int arg0, bool safepoint_pc) {
   int r_tgt = CallHelperSetup(helper_offset);
   LoadConstant(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
 void Mir2Lir::CallRuntimeHelperReg(ThreadOffset helper_offset, int arg0, bool safepoint_pc) {
   int r_tgt = CallHelperSetup(helper_offset);
   OpRegCopy(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -78,7 +81,7 @@ void Mir2Lir::CallRuntimeHelperRegLocation(ThreadOffset helper_offset, RegLocati
   } else {
     LoadValueDirectWideFixed(arg0, TargetReg(kArg0), TargetReg(kArg1));
   }
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -87,7 +90,7 @@ void Mir2Lir::CallRuntimeHelperImmImm(ThreadOffset helper_offset, int arg0, int 
   int r_tgt = CallHelperSetup(helper_offset);
   LoadConstant(TargetReg(kArg0), arg0);
   LoadConstant(TargetReg(kArg1), arg1);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -100,7 +103,7 @@ void Mir2Lir::CallRuntimeHelperImmRegLocation(ThreadOffset helper_offset, int ar
     LoadValueDirectWideFixed(arg1, TargetReg(kArg1), TargetReg(kArg2));
   }
   LoadConstant(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -109,7 +112,7 @@ void Mir2Lir::CallRuntimeHelperRegLocationImm(ThreadOffset helper_offset, RegLoc
   int r_tgt = CallHelperSetup(helper_offset);
   LoadValueDirectFixed(arg0, TargetReg(kArg0));
   LoadConstant(TargetReg(kArg1), arg1);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -118,7 +121,7 @@ void Mir2Lir::CallRuntimeHelperImmReg(ThreadOffset helper_offset, int arg0, int 
   int r_tgt = CallHelperSetup(helper_offset);
   OpRegCopy(TargetReg(kArg1), arg1);
   LoadConstant(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -127,7 +130,7 @@ void Mir2Lir::CallRuntimeHelperRegImm(ThreadOffset helper_offset, int arg0, int 
   int r_tgt = CallHelperSetup(helper_offset);
   OpRegCopy(TargetReg(kArg0), arg0);
   LoadConstant(TargetReg(kArg1), arg1);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -135,7 +138,7 @@ void Mir2Lir::CallRuntimeHelperImmMethod(ThreadOffset helper_offset, int arg0, b
   int r_tgt = CallHelperSetup(helper_offset);
   LoadCurrMethodDirect(TargetReg(kArg1));
   LoadConstant(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -165,7 +168,7 @@ void Mir2Lir::CallRuntimeHelperRegLocationRegLocation(ThreadOffset helper_offset
       LoadValueDirectWideFixed(arg1, arg1.fp ? TargetReg(kFArg2) : TargetReg(kArg2), arg1.fp ? TargetReg(kFArg3) : TargetReg(kArg3));
     }
   }
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -175,7 +178,7 @@ void Mir2Lir::CallRuntimeHelperRegReg(ThreadOffset helper_offset, int arg0, int 
   DCHECK_NE(TargetReg(kArg0), arg1);  // check copy into arg0 won't clobber arg1
   OpRegCopy(TargetReg(kArg0), arg0);
   OpRegCopy(TargetReg(kArg1), arg1);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -186,7 +189,7 @@ void Mir2Lir::CallRuntimeHelperRegRegImm(ThreadOffset helper_offset, int arg0, i
   OpRegCopy(TargetReg(kArg0), arg0);
   OpRegCopy(TargetReg(kArg1), arg1);
   LoadConstant(TargetReg(kArg2), arg2);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -196,7 +199,7 @@ void Mir2Lir::CallRuntimeHelperImmMethodRegLocation(ThreadOffset helper_offset,
   LoadValueDirectFixed(arg2, TargetReg(kArg2));
   LoadCurrMethodDirect(TargetReg(kArg1));
   LoadConstant(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -206,7 +209,7 @@ void Mir2Lir::CallRuntimeHelperImmMethodImm(ThreadOffset helper_offset, int arg0
   LoadCurrMethodDirect(TargetReg(kArg1));
   LoadConstant(TargetReg(kArg2), arg2);
   LoadConstant(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -214,6 +217,7 @@ void Mir2Lir::CallRuntimeHelperImmRegLocationRegLocation(ThreadOffset helper_off
                                                          int arg0, RegLocation arg1,
                                                          RegLocation arg2, bool safepoint_pc) {
   int r_tgt = CallHelperSetup(helper_offset);
+  DCHECK_EQ(arg1.wide, 0U);
   LoadValueDirectFixed(arg1, TargetReg(kArg1));
   if (arg2.wide == 0) {
     LoadValueDirectFixed(arg2, TargetReg(kArg2));
@@ -221,7 +225,22 @@ void Mir2Lir::CallRuntimeHelperImmRegLocationRegLocation(ThreadOffset helper_off
     LoadValueDirectWideFixed(arg2, TargetReg(kArg2), TargetReg(kArg3));
   }
   LoadConstant(TargetReg(kArg0), arg0);
-  ClobberCalleeSave();
+  ClobberCallerSave();
+  CallHelper(r_tgt, helper_offset, safepoint_pc);
+}
+
+void Mir2Lir::CallRuntimeHelperRegLocationRegLocationRegLocation(ThreadOffset helper_offset,
+                                                                 RegLocation arg0, RegLocation arg1,
+                                                                 RegLocation arg2,
+                                                                 bool safepoint_pc) {
+  int r_tgt = CallHelperSetup(helper_offset);
+  DCHECK_EQ(arg0.wide, 0U);
+  LoadValueDirectFixed(arg0, TargetReg(kArg0));
+  DCHECK_EQ(arg1.wide, 0U);
+  LoadValueDirectFixed(arg1, TargetReg(kArg1));
+  DCHECK_EQ(arg1.wide, 0U);
+  LoadValueDirectFixed(arg2, TargetReg(kArg2));
+  ClobberCallerSave();
   CallHelper(r_tgt, helper_offset, safepoint_pc);
 }
 
@@ -334,16 +353,13 @@ static int NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
                           uintptr_t direct_code, uintptr_t direct_method,
                           InvokeType type) {
   Mir2Lir* cg = static_cast<Mir2Lir*>(cu->cg.get());
-  if (cu->instruction_set != kThumb2) {
-    // Disable sharpening
-    direct_code = 0;
-    direct_method = 0;
-  }
   if (direct_code != 0 && direct_method != 0) {
     switch (state) {
     case 0:  // Get the current Method* [sets kArg0]
       if (direct_code != static_cast<unsigned int>(-1)) {
-        cg->LoadConstant(cg->TargetReg(kInvokeTgt), direct_code);
+        if (cu->instruction_set != kX86) {
+          cg->LoadConstant(cg->TargetReg(kInvokeTgt), direct_code);
+        }
       } else {
         CHECK_EQ(cu->dex_file, target_method.dex_file);
         LIR* data_target = cg->ScanLiteralPool(cg->code_literal_list_,
@@ -389,6 +405,7 @@ static int NextSDCallInsn(CompilationUnit* cu, CallInfo* info,
           cg->LoadConstant(cg->TargetReg(kInvokeTgt), direct_code);
         } else {
           CHECK_EQ(cu->dex_file, target_method.dex_file);
+          CHECK_LT(target_method.dex_method_index, target_method.dex_file->NumMethodIds());
           LIR* data_target = cg->ScanLiteralPool(cg->code_literal_list_,
                                                  target_method.dex_method_index, 0);
           if (data_target == NULL) {
@@ -477,73 +494,56 @@ static int NextVCallInsn(CompilationUnit* cu, CallInfo* info,
 }
 
 /*
- * All invoke-interface calls bounce off of art_quick_invoke_interface_trampoline,
- * which will locate the target and continue on via a tail call.
+ * Emit the next instruction in an invoke interface sequence. This will do a lookup in the
+ * class's IMT, calling either the actual method or art_quick_imt_conflict_trampoline if
+ * more than one interface method map to the same index. Note also that we'll load the first
+ * argument ("this") into kArg1 here rather than the standard LoadArgRegs.
  */
 static int NextInterfaceCallInsn(CompilationUnit* cu, CallInfo* info, int state,
                                  const MethodReference& target_method,
-                                 uint32_t unused, uintptr_t unused2,
-                                 uintptr_t direct_method, InvokeType unused4) {
+                                 uint32_t method_idx, uintptr_t unused,
+                                 uintptr_t direct_method, InvokeType unused2) {
   Mir2Lir* cg = static_cast<Mir2Lir*>(cu->cg.get());
-  if (cu->instruction_set != kThumb2) {
-    // Disable sharpening
-    direct_method = 0;
-  }
-  ThreadOffset trampoline = QUICK_ENTRYPOINT_OFFSET(pInvokeInterfaceTrampoline);
 
-  if (direct_method != 0) {
-    switch (state) {
-      case 0:  // Load the trampoline target [sets kInvokeTgt].
-        if (cu->instruction_set != kX86) {
-          cg->LoadWordDisp(cg->TargetReg(kSelf), trampoline.Int32Value(),
-                           cg->TargetReg(kInvokeTgt));
-        }
-        // Get the interface Method* [sets kArg0]
-        if (direct_method != static_cast<unsigned int>(-1)) {
-          cg->LoadConstant(cg->TargetReg(kArg0), direct_method);
-        } else {
-          CHECK_EQ(cu->dex_file, target_method.dex_file);
-          LIR* data_target = cg->ScanLiteralPool(cg->method_literal_list_,
-                                                 target_method.dex_method_index, 0);
-          if (data_target == NULL) {
-            data_target = cg->AddWordData(&cg->method_literal_list_,
-                                          target_method.dex_method_index);
-            data_target->operands[1] = kInterface;
-          }
-          LIR* load_pc_rel = cg->OpPcRelLoad(cg->TargetReg(kArg0), data_target);
-          cg->AppendLIR(load_pc_rel);
-          DCHECK_EQ(cu->instruction_set, kThumb2) << reinterpret_cast<void*>(data_target);
-        }
-        break;
-      default:
-        return -1;
-    }
-  } else {
-    switch (state) {
-      case 0:
-        // Get the current Method* [sets kArg0] - TUNING: remove copy of method if it is promoted.
-        cg->LoadCurrMethodDirect(cg->TargetReg(kArg0));
-        // Load the trampoline target [sets kInvokeTgt].
-        if (cu->instruction_set != kX86) {
-          cg->LoadWordDisp(cg->TargetReg(kSelf), trampoline.Int32Value(),
-                           cg->TargetReg(kInvokeTgt));
-        }
-        break;
-    case 1:  // Get method->dex_cache_resolved_methods_ [set/use kArg0]
-      cg->LoadWordDisp(cg->TargetReg(kArg0),
-                       mirror::ArtMethod::DexCacheResolvedMethodsOffset().Int32Value(),
-                       cg->TargetReg(kArg0));
-      break;
-    case 2:  // Grab target method* [set/use kArg0]
+  switch (state) {
+    case 0:  // Set target method index in case of conflict [set kHiddenArg, kHiddenFpArg (x86)]
       CHECK_EQ(cu->dex_file, target_method.dex_file);
-      cg->LoadWordDisp(cg->TargetReg(kArg0),
-                       mirror::Array::DataOffset(sizeof(mirror::Object*)).Int32Value() +
-                           (target_method.dex_method_index * 4),
+      CHECK_LT(target_method.dex_method_index, target_method.dex_file->NumMethodIds());
+      cg->LoadConstant(cg->TargetReg(kHiddenArg), target_method.dex_method_index);
+      if (cu->instruction_set == kX86) {
+        cg->OpRegCopy(cg->TargetReg(kHiddenFpArg), cg->TargetReg(kHiddenArg));
+      }
+      break;
+    case 1: {  // Get "this" [set kArg1]
+      RegLocation  rl_arg = info->args[0];
+      cg->LoadValueDirectFixed(rl_arg, cg->TargetReg(kArg1));
+      break;
+    }
+    case 2:  // Is "this" null? [use kArg1]
+      cg->GenNullCheck(info->args[0].s_reg_low, cg->TargetReg(kArg1), info->opt_flags);
+      // Get this->klass_ [use kArg1, set kInvokeTgt]
+      cg->LoadWordDisp(cg->TargetReg(kArg1), mirror::Object::ClassOffset().Int32Value(),
+                       cg->TargetReg(kInvokeTgt));
+      break;
+    case 3:  // Get this->klass_->imtable [use kInvokeTgt, set kInvokeTgt]
+      cg->LoadWordDisp(cg->TargetReg(kInvokeTgt), mirror::Class::ImTableOffset().Int32Value(),
+                       cg->TargetReg(kInvokeTgt));
+      break;
+    case 4:  // Get target method [use kInvokeTgt, set kArg0]
+      cg->LoadWordDisp(cg->TargetReg(kInvokeTgt), ((method_idx % ClassLinker::kImtSize) * 4) +
+                       mirror::Array::DataOffset(sizeof(mirror::Object*)).Int32Value(),
                        cg->TargetReg(kArg0));
       break;
+    case 5:  // Get the compiled code address [use kArg0, set kInvokeTgt]
+      if (cu->instruction_set != kX86) {
+        cg->LoadWordDisp(cg->TargetReg(kArg0),
+                         mirror::ArtMethod::GetEntryPointFromCompiledCodeOffset().Int32Value(),
+                         cg->TargetReg(kInvokeTgt));
+        break;
+      }
+      // Intentional fallthrough for X86
     default:
       return -1;
-    }
   }
   return state + 1;
 }
@@ -810,7 +810,7 @@ int Mir2Lir::GenDalvikArgsRange(CallInfo* info, int call_state,
       OpRegRegImm(kOpAdd, TargetReg(kArg3), TargetReg(kSp), start_offset);
       LIR* ld = OpVldm(TargetReg(kArg3), regs_left);
       // TUNING: loosen barrier
-      ld->def_mask = ENCODE_ALL;
+      ld->u.m.def_mask = ENCODE_ALL;
       SetMemRefType(ld, true /* is_load */, kDalvikReg);
       call_state = next_call_insn(cu_, info, call_state, target_method, vtable_idx,
                                direct_code, direct_method, type);
@@ -819,7 +819,7 @@ int Mir2Lir::GenDalvikArgsRange(CallInfo* info, int call_state,
                                direct_code, direct_method, type);
       LIR* st = OpVstm(TargetReg(kArg3), regs_left);
       SetMemRefType(st, false /* is_load */, kDalvikReg);
-      st->def_mask = ENCODE_ALL;
+      st->u.m.def_mask = ENCODE_ALL;
       call_state = next_call_insn(cu_, info, call_state, target_method, vtable_idx,
                                direct_code, direct_method, type);
     }
@@ -892,22 +892,22 @@ bool Mir2Lir::GenInlinedCharAt(CallInfo* info) {
     LoadWordDisp(rl_obj.low_reg, value_offset, reg_ptr);
     if (range_check) {
       // Set up a launch pad to allow retry in case of bounds violation */
-      launch_pad = RawLIR(0, kPseudoIntrinsicRetry, reinterpret_cast<uintptr_t>(info));
+      launch_pad = RawLIR(0, kPseudoIntrinsicRetry, WrapPointer(info));
       intrinsic_launchpads_.Insert(launch_pad);
       OpRegReg(kOpCmp, rl_idx.low_reg, reg_max);
       FreeTemp(reg_max);
-      OpCondBranch(kCondCs, launch_pad);
+      OpCondBranch(kCondUge, launch_pad);
     }
   } else {
     if (range_check) {
       reg_max = AllocTemp();
       LoadWordDisp(rl_obj.low_reg, count_offset, reg_max);
       // Set up a launch pad to allow retry in case of bounds violation */
-      launch_pad = RawLIR(0, kPseudoIntrinsicRetry, reinterpret_cast<uintptr_t>(info));
+      launch_pad = RawLIR(0, kPseudoIntrinsicRetry, WrapPointer(info));
       intrinsic_launchpads_.Insert(launch_pad);
       OpRegReg(kOpCmp, rl_idx.low_reg, reg_max);
       FreeTemp(reg_max);
-      OpCondBranch(kCondCc, launch_pad);
+      OpCondBranch(kCondUge, launch_pad);
     }
     reg_off = AllocTemp();
     reg_ptr = AllocTemp();
@@ -958,6 +958,38 @@ bool Mir2Lir::GenInlinedStringIsEmptyOrLength(CallInfo* info, bool is_empty) {
     }
   }
   StoreValue(rl_dest, rl_result);
+  return true;
+}
+
+bool Mir2Lir::GenInlinedReverseBytes(CallInfo* info, OpSize size) {
+  if (cu_->instruction_set == kMips) {
+    // TODO - add Mips implementation
+    return false;
+  }
+  RegLocation rl_src_i = info->args[0];
+  RegLocation rl_dest = InlineTarget(info);  // result reg
+  RegLocation rl_result = EvalLoc(rl_dest, kCoreReg, true);
+  if (size == kLong) {
+    RegLocation rl_i = LoadValueWide(rl_src_i, kCoreReg);
+    int r_i_low = rl_i.low_reg;
+    if (rl_i.low_reg == rl_result.low_reg) {
+      // First REV shall clobber rl_result.low_reg, save the value in a temp for the second REV.
+      r_i_low = AllocTemp();
+      OpRegCopy(r_i_low, rl_i.low_reg);
+    }
+    OpRegReg(kOpRev, rl_result.low_reg, rl_i.high_reg);
+    OpRegReg(kOpRev, rl_result.high_reg, r_i_low);
+    if (rl_i.low_reg == rl_result.low_reg) {
+      FreeTemp(r_i_low);
+    }
+    StoreValueWide(rl_dest, rl_result);
+  } else {
+    DCHECK(size == kWord || size == kSignedHalf);
+    OpKind op = (size == kWord) ? kOpRev : kOpRevsh;
+    RegLocation rl_i = LoadValue(rl_src_i, kCoreReg);
+    OpRegReg(op, rl_result.low_reg, rl_i.low_reg);
+    StoreValue(rl_dest, rl_result);
+  }
   return true;
 }
 
@@ -1051,7 +1083,7 @@ bool Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
     // TODO - add Mips implementation
     return false;
   }
-  ClobberCalleeSave();
+  ClobberCallerSave();
   LockCallTemps();  // Using fixed registers
   int reg_ptr = TargetReg(kArg0);
   int reg_char = TargetReg(kArg1);
@@ -1069,7 +1101,7 @@ bool Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
   }
   int r_tgt = (cu_->instruction_set != kX86) ? LoadHelper(QUICK_ENTRYPOINT_OFFSET(pIndexOf)) : 0;
   GenNullCheck(rl_obj.s_reg_low, reg_ptr, info->opt_flags);
-  LIR* launch_pad = RawLIR(0, kPseudoIntrinsicRetry, reinterpret_cast<uintptr_t>(info));
+  LIR* launch_pad = RawLIR(0, kPseudoIntrinsicRetry, WrapPointer(info));
   intrinsic_launchpads_.Insert(launch_pad);
   OpCmpImmBranch(kCondGt, reg_char, 0xFFFF, launch_pad);
   // NOTE: not a safepoint
@@ -1079,7 +1111,7 @@ bool Mir2Lir::GenInlinedIndexOf(CallInfo* info, bool zero_based) {
     OpThreadMem(kOpBlx, QUICK_ENTRYPOINT_OFFSET(pIndexOf));
   }
   LIR* resume_tgt = NewLIR0(kPseudoTargetLabel);
-  launch_pad->operands[2] = reinterpret_cast<uintptr_t>(resume_tgt);
+  launch_pad->operands[2] = WrapPointer(resume_tgt);
   // Record that we've already inlined & null checked
   info->opt_flags |= (MIR_INLINED | MIR_IGNORE_NULL_CHECK);
   RegLocation rl_return = GetReturn(false);
@@ -1094,7 +1126,7 @@ bool Mir2Lir::GenInlinedStringCompareTo(CallInfo* info) {
     // TODO - add Mips implementation
     return false;
   }
-  ClobberCalleeSave();
+  ClobberCallerSave();
   LockCallTemps();  // Using fixed registers
   int reg_this = TargetReg(kArg0);
   int reg_cmp = TargetReg(kArg1);
@@ -1107,7 +1139,7 @@ bool Mir2Lir::GenInlinedStringCompareTo(CallInfo* info) {
       LoadHelper(QUICK_ENTRYPOINT_OFFSET(pStringCompareTo)) : 0;
   GenNullCheck(rl_this.s_reg_low, reg_this, info->opt_flags);
   // TUNING: check if rl_cmp.s_reg_low is already null checked
-  LIR* launch_pad = RawLIR(0, kPseudoIntrinsicRetry, reinterpret_cast<uintptr_t>(info));
+  LIR* launch_pad = RawLIR(0, kPseudoIntrinsicRetry, WrapPointer(info));
   intrinsic_launchpads_.Insert(launch_pad);
   OpCmpImmBranch(kCondEq, reg_cmp, 0, launch_pad);
   // NOTE: not a safepoint
@@ -1205,155 +1237,13 @@ bool Mir2Lir::GenInlinedUnsafePut(CallInfo* info, bool is_long,
   return true;
 }
 
-bool Mir2Lir::GenIntrinsic(CallInfo* info) {
-  if (info->opt_flags & MIR_INLINED) {
-    return false;
-  }
-  /*
-   * TODO: move these to a target-specific structured constant array
-   * and use a generic match function.  The list of intrinsics may be
-   * slightly different depending on target.
-   * TODO: Fold this into a matching function that runs during
-   * basic block building.  This should be part of the action for
-   * small method inlining and recognition of the special object init
-   * method.  By doing this during basic block construction, we can also
-   * take advantage of/generate new useful dataflow info.
-   */
-  StringPiece tgt_methods_declaring_class(
-      cu_->dex_file->GetMethodDeclaringClassDescriptor(cu_->dex_file->GetMethodId(info->index)));
-  if (tgt_methods_declaring_class.starts_with("Ljava/lang/Double;")) {
-    std::string tgt_method(PrettyMethod(info->index, *cu_->dex_file));
-    if (tgt_method == "long java.lang.Double.doubleToRawLongBits(double)") {
-      return GenInlinedDoubleCvt(info);
-    }
-    if (tgt_method == "double java.lang.Double.longBitsToDouble(long)") {
-      return GenInlinedDoubleCvt(info);
-    }
-  } else if (tgt_methods_declaring_class.starts_with("Ljava/lang/Float;")) {
-    std::string tgt_method(PrettyMethod(info->index, *cu_->dex_file));
-    if (tgt_method == "int java.lang.Float.float_to_raw_int_bits(float)") {
-      return GenInlinedFloatCvt(info);
-    }
-    if (tgt_method == "float java.lang.Float.intBitsToFloat(int)") {
-      return GenInlinedFloatCvt(info);
-    }
-  } else if (tgt_methods_declaring_class.starts_with("Ljava/lang/Math;") ||
-             tgt_methods_declaring_class.starts_with("Ljava/lang/StrictMath;")) {
-    std::string tgt_method(PrettyMethod(info->index, *cu_->dex_file));
-    if (tgt_method == "int java.lang.Math.abs(int)" ||
-        tgt_method == "int java.lang.StrictMath.abs(int)") {
-      return GenInlinedAbsInt(info);
-    }
-    if (tgt_method == "long java.lang.Math.abs(long)" ||
-        tgt_method == "long java.lang.StrictMath.abs(long)") {
-      return GenInlinedAbsLong(info);
-    }
-    if (tgt_method == "int java.lang.Math.max(int, int)" ||
-        tgt_method == "int java.lang.StrictMath.max(int, int)") {
-      return GenInlinedMinMaxInt(info, false /* is_min */);
-    }
-    if (tgt_method == "int java.lang.Math.min(int, int)" ||
-        tgt_method == "int java.lang.StrictMath.min(int, int)") {
-      return GenInlinedMinMaxInt(info, true /* is_min */);
-    }
-    if (tgt_method == "double java.lang.Math.sqrt(double)" ||
-        tgt_method == "double java.lang.StrictMath.sqrt(double)") {
-      return GenInlinedSqrt(info);
-    }
-  } else if (tgt_methods_declaring_class.starts_with("Ljava/lang/String;")) {
-    std::string tgt_method(PrettyMethod(info->index, *cu_->dex_file));
-    if (tgt_method == "char java.lang.String.charAt(int)") {
-      return GenInlinedCharAt(info);
-    }
-    if (tgt_method == "int java.lang.String.compareTo(java.lang.String)") {
-      return GenInlinedStringCompareTo(info);
-    }
-    if (tgt_method == "boolean java.lang.String.is_empty()") {
-      return GenInlinedStringIsEmptyOrLength(info, true /* is_empty */);
-    }
-    if (tgt_method == "int java.lang.String.index_of(int, int)") {
-      return GenInlinedIndexOf(info, false /* base 0 */);
-    }
-    if (tgt_method == "int java.lang.String.index_of(int)") {
-      return GenInlinedIndexOf(info, true /* base 0 */);
-    }
-    if (tgt_method == "int java.lang.String.length()") {
-      return GenInlinedStringIsEmptyOrLength(info, false /* is_empty */);
-    }
-  } else if (tgt_methods_declaring_class.starts_with("Ljava/lang/Thread;")) {
-    std::string tgt_method(PrettyMethod(info->index, *cu_->dex_file));
-    if (tgt_method == "java.lang.Thread java.lang.Thread.currentThread()") {
-      return GenInlinedCurrentThread(info);
-    }
-  } else if (tgt_methods_declaring_class.starts_with("Lsun/misc/Unsafe;")) {
-    std::string tgt_method(PrettyMethod(info->index, *cu_->dex_file));
-    if (tgt_method == "boolean sun.misc.Unsafe.compareAndSwapInt(java.lang.Object, long, int, int)") {
-      return GenInlinedCas32(info, false);
-    }
-    if (tgt_method == "boolean sun.misc.Unsafe.compareAndSwapObject(java.lang.Object, long, java.lang.Object, java.lang.Object)") {
-      return GenInlinedCas32(info, true);
-    }
-    if (tgt_method == "int sun.misc.Unsafe.getInt(java.lang.Object, long)") {
-      return GenInlinedUnsafeGet(info, false /* is_long */, false /* is_volatile */);
-    }
-    if (tgt_method == "int sun.misc.Unsafe.getIntVolatile(java.lang.Object, long)") {
-      return GenInlinedUnsafeGet(info, false /* is_long */, true /* is_volatile */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putInt(java.lang.Object, long, int)") {
-      return GenInlinedUnsafePut(info, false /* is_long */, false /* is_object */,
-                                 false /* is_volatile */, false /* is_ordered */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putIntVolatile(java.lang.Object, long, int)") {
-      return GenInlinedUnsafePut(info, false /* is_long */, false /* is_object */,
-                                 true /* is_volatile */, false /* is_ordered */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putOrderedInt(java.lang.Object, long, int)") {
-      return GenInlinedUnsafePut(info, false /* is_long */, false /* is_object */,
-                                 false /* is_volatile */, true /* is_ordered */);
-    }
-    if (tgt_method == "long sun.misc.Unsafe.getLong(java.lang.Object, long)") {
-      return GenInlinedUnsafeGet(info, true /* is_long */, false /* is_volatile */);
-    }
-    if (tgt_method == "long sun.misc.Unsafe.getLongVolatile(java.lang.Object, long)") {
-      return GenInlinedUnsafeGet(info, true /* is_long */, true /* is_volatile */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putLong(java.lang.Object, long, long)") {
-      return GenInlinedUnsafePut(info, true /* is_long */, false /* is_object */,
-                                 false /* is_volatile */, false /* is_ordered */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putLongVolatile(java.lang.Object, long, long)") {
-      return GenInlinedUnsafePut(info, true /* is_long */, false /* is_object */,
-                                 true /* is_volatile */, false /* is_ordered */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putOrderedLong(java.lang.Object, long, long)") {
-      return GenInlinedUnsafePut(info, true /* is_long */, false /* is_object */,
-                                 false /* is_volatile */, true /* is_ordered */);
-    }
-    if (tgt_method == "java.lang.Object sun.misc.Unsafe.getObject(java.lang.Object, long)") {
-      return GenInlinedUnsafeGet(info, false /* is_long */, false /* is_volatile */);
-    }
-    if (tgt_method == "java.lang.Object sun.misc.Unsafe.getObjectVolatile(java.lang.Object, long)") {
-      return GenInlinedUnsafeGet(info, false /* is_long */, true /* is_volatile */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putObject(java.lang.Object, long, java.lang.Object)") {
-      return GenInlinedUnsafePut(info, false /* is_long */, true /* is_object */,
-                                 false /* is_volatile */, false /* is_ordered */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putObjectVolatile(java.lang.Object, long, java.lang.Object)") {
-      return GenInlinedUnsafePut(info, false /* is_long */, true /* is_object */,
-                                 true /* is_volatile */, false /* is_ordered */);
-    }
-    if (tgt_method == "void sun.misc.Unsafe.putOrderedObject(java.lang.Object, long, java.lang.Object)") {
-      return GenInlinedUnsafePut(info, false /* is_long */, true /* is_object */,
-                                 false /* is_volatile */, true /* is_ordered */);
-    }
-  }
-  return false;
-}
-
 void Mir2Lir::GenInvoke(CallInfo* info) {
-  if (GenIntrinsic(info)) {
-    return;
+  if (!(info->opt_flags & MIR_INLINED)) {
+    DCHECK(cu_->compiler_driver->GetMethodInlinerMap() != nullptr);
+    if (cu_->compiler_driver->GetMethodInlinerMap()->GetMethodInliner(cu_->dex_file)
+        ->GenIntrinsic(this, info)) {
+      return;
+    }
   }
   InvokeType original_type = info->type;  // avoiding mutation by ComputeInvokeInfo
   int call_state = 0;
@@ -1373,16 +1263,13 @@ void Mir2Lir::GenInvoke(CallInfo* info) {
   bool fast_path =
       cu_->compiler_driver->ComputeInvokeInfo(mir_graph_->GetCurrentDexCompilationUnit(),
                                               current_dalvik_offset_,
-                                              info->type, target_method,
-                                              vtable_idx,
-                                              direct_code, direct_method,
-                                              true) && !SLOW_INVOKE_PATH;
+                                              true, true,
+                                              &info->type, &target_method,
+                                              &vtable_idx,
+                                              &direct_code, &direct_method) && !SLOW_INVOKE_PATH;
   if (info->type == kInterface) {
-    if (fast_path) {
-      p_null_ck = &null_ck;
-    }
     next_call_insn = fast_path ? NextInterfaceCallInsn : NextInterfaceCallInsnWithAccessCheck;
-    skip_this = false;
+    skip_this = fast_path;
   } else if (info->type == kDirect) {
     if (fast_path) {
       p_null_ck = &null_ck;
@@ -1422,15 +1309,14 @@ void Mir2Lir::GenInvoke(CallInfo* info) {
   if (cu_->instruction_set != kX86) {
     call_inst = OpReg(kOpBlx, TargetReg(kInvokeTgt));
   } else {
-    if (fast_path && info->type != kInterface) {
+    if (fast_path) {
       call_inst = OpMem(kOpBlx, TargetReg(kArg0),
                         mirror::ArtMethod::GetEntryPointFromCompiledCodeOffset().Int32Value());
     } else {
       ThreadOffset trampoline(-1);
       switch (info->type) {
       case kInterface:
-        trampoline = fast_path ? QUICK_ENTRYPOINT_OFFSET(pInvokeInterfaceTrampoline)
-            : QUICK_ENTRYPOINT_OFFSET(pInvokeInterfaceTrampolineWithAccessCheck);
+        trampoline = QUICK_ENTRYPOINT_OFFSET(pInvokeInterfaceTrampolineWithAccessCheck);
         break;
       case kDirect:
         trampoline = QUICK_ENTRYPOINT_OFFSET(pInvokeDirectTrampolineWithAccessCheck);
@@ -1452,7 +1338,7 @@ void Mir2Lir::GenInvoke(CallInfo* info) {
   }
   MarkSafepointPC(call_inst);
 
-  ClobberCalleeSave();
+  ClobberCallerSave();
   if (info->result.location != kLocInvalid) {
     // We have a following MOVE_RESULT - do it now.
     if (info->result.wide) {

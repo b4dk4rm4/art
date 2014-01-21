@@ -31,6 +31,7 @@
 struct iovec;
 
 namespace art {
+  union JValue;
 namespace mirror {
   class ArtMethod;
 }  // namespace mirror
@@ -185,8 +186,11 @@ struct JdwpState {
    * issuing a MethodEntry on a native method.
    *
    * "eventFlags" indicates the types of events that have occurred.
+   *
+   * "returnValue" is non-null for MethodExit events only.
    */
-  bool PostLocationEvent(const JdwpLocation* pLoc, ObjectId thisPtr, int eventFlags)
+  bool PostLocationEvent(const JdwpLocation* pLoc, ObjectId thisPtr, int eventFlags,
+                         const JValue* returnValue)
      SHARED_LOCKS_REQUIRED(Locks::mutator_lock_);
 
   /*
@@ -324,9 +328,11 @@ struct JdwpState {
   AtomicInteger event_serial_;
 
   // Linked list of events requested by the debugger (breakpoints, class prep, etc).
-  Mutex event_list_lock_;
+  Mutex event_list_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   JdwpEvent* event_list_ GUARDED_BY(event_list_lock_);
-  int event_list_size_ GUARDED_BY(event_list_lock_);  // Number of elements in event_list_.
+  size_t event_list_size_ GUARDED_BY(event_list_lock_);  // Number of elements in event_list_.
+  size_t full_deoptimization_requests_ GUARDED_BY(event_list_lock_);  // Number of events requiring
+                                                                      // full deoptimization.
 
   // Used to synchronize suspension of the event thread (to avoid receiving "resume"
   // events before the thread has finished suspending itself).

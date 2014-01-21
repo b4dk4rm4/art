@@ -18,6 +18,7 @@ LOCAL_PATH := $(call my-dir)
 
 art_path := $(LOCAL_PATH)
 art_build_path := $(art_path)/build
+include $(art_build_path)/Android.common.mk
 
 ########################################################################
 # clean-oat targets
@@ -54,6 +55,8 @@ clean-oat-host:
 	rm -f $(TARGET_OUT_JAVA_LIBRARIES)/*.odex
 	rm -f $(TARGET_OUT_JAVA_LIBRARIES)/*.oat
 	rm -f $(TARGET_OUT_JAVA_LIBRARIES)/*.art
+	rm -f $(DEXPREOPT_PRODUCT_DIR_FULL_PATH)/$(DEXPREOPT_BOOT_JAR_DIR)/*.oat
+	rm -f $(DEXPREOPT_PRODUCT_DIR_FULL_PATH)/$(DEXPREOPT_BOOT_JAR_DIR)/*.art
 	rm -f $(TARGET_OUT_UNSTRIPPED)/system/framework/*.odex
 	rm -f $(TARGET_OUT_UNSTRIPPED)/system/framework/*.oat
 	rm -f $(TARGET_OUT_APPS)/*.odex
@@ -70,9 +73,9 @@ clean-oat-target:
 	adb shell rm $(ART_TEST_DIR)/*.odex
 	adb shell rm $(ART_TEST_DIR)/*.oat
 	adb shell rm $(ART_TEST_DIR)/*.art
-	adb shell rm $(DALVIK_CACHE_DIR)/*.dex
-	adb shell rm $(DALVIK_CACHE_DIR)/*.oat
-	adb shell rm $(DALVIK_CACHE_DIR)/*.art
+	adb shell rm $(ART_DALVIK_CACHE_DIR)/*.dex
+	adb shell rm $(ART_DALVIK_CACHE_DIR)/*.oat
+	adb shell rm $(ART_DALVIK_CACHE_DIR)/*.art
 	adb shell rm $(DEXPREOPT_BOOT_JAR_DIR)/*.oat
 	adb shell rm $(DEXPREOPT_BOOT_JAR_DIR)/*.art
 	adb shell rm system/app/*.odex
@@ -85,15 +88,16 @@ ifneq ($(art_dont_bother),true)
 include $(art_path)/runtime/Android.mk
 include $(art_path)/compiler/Android.mk
 include $(art_path)/dex2oat/Android.mk
+include $(art_path)/disassembler/Android.mk
 include $(art_path)/oatdump/Android.mk
 include $(art_path)/dalvikvm/Android.mk
 include $(art_path)/jdwpspy/Android.mk
 include $(art_build_path)/Android.oat.mk
 
 # ART_HOST_DEPENDENCIES depends on Android.executable.mk above for ART_HOST_EXECUTABLES
-ART_HOST_DEPENDENCIES := $(ART_HOST_EXECUTABLES) $(HOST_OUT_JAVA_LIBRARIES)/core-hostdex.jar
+ART_HOST_DEPENDENCIES := $(ART_HOST_EXECUTABLES) $(HOST_OUT_JAVA_LIBRARIES)/core-libart-hostdex.jar
 ART_HOST_DEPENDENCIES += $(HOST_OUT_SHARED_LIBRARIES)/libjavacore$(ART_HOST_SHLIB_EXTENSION)
-ART_TARGET_DEPENDENCIES := $(ART_TARGET_EXECUTABLES) $(TARGET_OUT_JAVA_LIBRARIES)/core.jar $(TARGET_OUT_SHARED_LIBRARIES)/libjavacore.so
+ART_TARGET_DEPENDENCIES := $(ART_TARGET_EXECUTABLES) $(TARGET_OUT_JAVA_LIBRARIES)/core-libart.jar $(TARGET_OUT_SHARED_LIBRARIES)/libjavacore.so
 
 ########################################################################
 # test targets
@@ -145,14 +149,9 @@ test-art-host-dependencies: $(ART_HOST_TEST_DEPENDENCIES) $(HOST_OUT_SHARED_LIBR
 test-art-host-gtest: $(ART_HOST_TEST_TARGETS)
 	@echo test-art-host-gtest PASSED
 
-define run-host-gtests-with
-  $(foreach file,$(sort $(ART_HOST_TEST_EXECUTABLES)),$(1) $(file) &&) true
-endef
-
 # "mm valgrind-test-art-host-gtest" to build and run the host gtests under valgrind.
 .PHONY: valgrind-test-art-host-gtest
-valgrind-test-art-host-gtest: test-art-host-dependencies
-	$(call run-host-gtests-with,valgrind --leak-check=full)
+valgrind-test-art-host-gtest: $(ART_HOST_VALGRIND_TEST_TARGETS)
 	@echo valgrind-test-art-host-gtest PASSED
 
 .PHONY: test-art-host-oat-default
@@ -267,9 +266,9 @@ else
 .PHONY: oat-target-$(1)
 oat-target-$(1): $$(OUT_OAT_FILE)
 
-$$(OUT_OAT_FILE): $(PRODUCT_OUT)/$(1) $(TARGET_BOOT_IMG_OUT) $(DEX2OAT_DEPENDENCY)
+$$(OUT_OAT_FILE): $(PRODUCT_OUT)/$(1) $(DEFAULT_DEX_PREOPT_BUILT_IMAGE) $(DEX2OAT_DEPENDENCY)
 	@mkdir -p $$(dir $$@)
-	$(DEX2OAT) $(PARALLEL_ART_COMPILE_JOBS) --runtime-arg -Xms64m --runtime-arg -Xmx64m --boot-image=$(TARGET_BOOT_IMG_OUT) --dex-file=$(PRODUCT_OUT)/$(1) --dex-location=/$(1) --oat-file=$$@ --host-prefix=$(PRODUCT_OUT) --instruction-set=$(TARGET_ARCH) --android-root=$(PRODUCT_OUT)/system
+	$(DEX2OAT) --runtime-arg -Xms64m --runtime-arg -Xmx64m --boot-image=$(DEFAULT_DEX_PREOPT_BUILT_IMAGE) --dex-file=$(PRODUCT_OUT)/$(1) --dex-location=/$(1) --oat-file=$$@ --host-prefix=$(PRODUCT_OUT) --instruction-set=$(TARGET_ARCH) --instruction-set-features=$(TARGET_INSTRUCTION_SET_FEATURES) --android-root=$(PRODUCT_OUT)/system
 
 endif
 
@@ -278,12 +277,12 @@ endef
 
 $(foreach file,\
   $(filter-out\
-    $(addprefix $(TARGET_OUT_JAVA_LIBRARIES)/,$(addsuffix .jar,$(TARGET_BOOT_JARS))),\
+    $(addprefix $(TARGET_OUT_JAVA_LIBRARIES)/,$(addsuffix .jar,$(LIBART_TARGET_BOOT_JARS))),\
     $(wildcard $(TARGET_OUT_APPS)/*.apk) $(wildcard $(TARGET_OUT_JAVA_LIBRARIES)/*.jar)),\
   $(eval $(call declare-oat-target-target,$(subst $(PRODUCT_OUT)/,,$(file)))))
 
 .PHONY: oat-target
-oat-target: $(ART_TARGET_DEPENDENCIES) $(TARGET_BOOT_OAT_OUT) $(OAT_TARGET_TARGETS)
+oat-target: $(ART_TARGET_DEPENDENCIES) $(DEFAULT_DEX_PREOPT_INSTALLED_IMAGE) $(OAT_TARGET_TARGETS)
 
 .PHONY: oat-target-sync
 oat-target-sync: oat-target
@@ -304,6 +303,13 @@ build-art-target: $(ART_TARGET_EXECUTABLES) $(ART_TARGET_TEST_EXECUTABLES) $(TAR
 ########################################################################
 # oatdump targets
 
+ART_DUMP_OAT_PATH ?= $(OUT_DIR)
+
+OATDUMP := $(HOST_OUT_EXECUTABLES)/oatdump$(HOST_EXECUTABLE_SUFFIX)
+OATDUMPD := $(HOST_OUT_EXECUTABLES)/oatdumpd$(HOST_EXECUTABLE_SUFFIX)
+# TODO: for now, override with debug version for better error reporting
+OATDUMP := $(OATDUMPD)
+
 .PHONY: dump-oat
 dump-oat: dump-oat-core dump-oat-boot
 
@@ -313,29 +319,29 @@ dump-oat-core: dump-oat-core-host dump-oat-core-target
 .PHONY: dump-oat-core-host
 ifeq ($(ART_BUILD_HOST),true)
 dump-oat-core-host: $(HOST_CORE_IMG_OUT) $(OATDUMP)
-	$(OATDUMP) --image=$(HOST_CORE_IMG_OUT) --output=/tmp/core.host.oatdump.txt --host-prefix=""
-	@echo Output in /tmp/core.host.oatdump.txt
+	$(OATDUMP) --image=$(HOST_CORE_IMG_OUT) --output=$(ART_DUMP_OAT_PATH)/core.host.oatdump.txt --host-prefix=""
+	@echo Output in $(ART_DUMP_OAT_PATH)/core.host.oatdump.txt
 endif
 
 .PHONY: dump-oat-core-target
 ifeq ($(ART_BUILD_TARGET),true)
 dump-oat-core-target: $(TARGET_CORE_IMG_OUT) $(OATDUMP)
-	$(OATDUMP) --image=$(TARGET_CORE_IMG_OUT) --output=/tmp/core.target.oatdump.txt
-	@echo Output in /tmp/core.target.oatdump.txt
+	$(OATDUMP) --image=$(TARGET_CORE_IMG_OUT) --output=$(ART_DUMP_OAT_PATH)/core.target.oatdump.txt
+	@echo Output in $(ART_DUMP_OAT_PATH)/core.target.oatdump.txt
 endif
 
 .PHONY: dump-oat-boot
 ifeq ($(ART_BUILD_TARGET_NDEBUG),true)
-dump-oat-boot: $(TARGET_BOOT_IMG_OUT) $(OATDUMP)
-	$(OATDUMP) --image=$(TARGET_BOOT_IMG_OUT) --output=/tmp/boot.oatdump.txt
-	@echo Output in /tmp/boot.oatdump.txt
+dump-oat-boot: $(DEFAULT_DEX_PREOPT_BUILT_IMAGE) $(OATDUMP)
+	$(OATDUMP) --image=$(DEFAULT_DEX_PREOPT_BUILT_IMAGE) --output=$(ART_DUMP_OAT_PATH)/boot.oatdump.txt
+	@echo Output in $(ART_DUMP_OAT_PATH)/boot.oatdump.txt
 endif
 
 .PHONY: dump-oat-Calculator
 ifeq ($(ART_BUILD_TARGET_NDEBUG),true)
-dump-oat-Calculator: $(TARGET_OUT_APPS)/Calculator.odex $(TARGET_BOOT_IMG_OUT) $(OATDUMP)
-	$(OATDUMP) --oat-file=$< --output=/tmp/Calculator.oatdump.txt
-	@echo Output in /tmp/Calculator.oatdump.txt
+dump-oat-Calculator: $(TARGET_OUT_APPS)/Calculator.odex $(DEFAULT_DEX_PREOPT_BUILT_IMAGE) $(OATDUMP)
+	$(OATDUMP) --oat-file=$< --output=$(ART_DUMP_OAT_PATH)/Calculator.oatdump.txt
+	@echo Output in $(ART_DUMP_OAT_PATH)/Calculator.oatdump.txt
 endif
 
 ########################################################################

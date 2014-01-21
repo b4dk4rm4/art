@@ -23,18 +23,21 @@
 #include "mirror/class-inl.h"
 #include "object_utils.h"
 #include "reflection.h"
-#include "scoped_thread_state_change.h"
+#include "scoped_fast_native_object_access.h"
 
 namespace art {
 
-static bool GetFieldValue(const ScopedObjectAccess& soa, mirror::Object* o, mirror::ArtField* f,
-                          JValue& value, bool allow_references)
+static bool GetFieldValue(const ScopedFastNativeObjectAccess& soa, mirror::Object* o,
+                          mirror::ArtField* f, JValue& value, bool allow_references)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   DCHECK_EQ(value.GetJ(), 0LL);
-  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(f->GetDeclaringClass(),
-                                                               true, true)) {
+  CHECK(!kMovingFields);
+  SirtRef<mirror::Object> sirt_obj(soa.Self(), o);
+  SirtRef<mirror::Class> sirt_klass(soa.Self(), f->GetDeclaringClass());
+  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(sirt_klass, true, true)) {
     return false;
   }
+  o = sirt_obj.get();
   switch (FieldHelper(f).GetTypeAsPrimitiveType()) {
   case Primitive::kPrimBoolean:
     value.SetZ(f->GetBoolean(o));
@@ -77,8 +80,8 @@ static bool GetFieldValue(const ScopedObjectAccess& soa, mirror::Object* o, mirr
   return false;
 }
 
-static bool CheckReceiver(const ScopedObjectAccess& soa, jobject j_rcvr, mirror::ArtField* f,
-                          mirror::Object*& class_or_rcvr)
+static bool CheckReceiver(const ScopedFastNativeObjectAccess& soa, jobject j_rcvr,
+                          mirror::ArtField* f, mirror::Object*& class_or_rcvr)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
   if (f->IsStatic()) {
     class_or_rcvr = f->GetDeclaringClass();
@@ -94,7 +97,7 @@ static bool CheckReceiver(const ScopedObjectAccess& soa, jobject j_rcvr, mirror:
 }
 
 static jobject Field_get(JNIEnv* env, jobject javaField, jobject javaObj) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   mirror::ArtField* f = soa.DecodeField(env->FromReflectedField(javaField));
   mirror::Object* o = NULL;
   if (!CheckReceiver(soa, javaObj, f, o)) {
@@ -112,7 +115,7 @@ static jobject Field_get(JNIEnv* env, jobject javaField, jobject javaObj) {
 
 static JValue GetPrimitiveField(JNIEnv* env, jobject javaField, jobject javaObj,
                                 char dst_descriptor) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   mirror::ArtField* f = soa.DecodeField(env->FromReflectedField(javaField));
   mirror::Object* o = NULL;
   if (!CheckReceiver(soa, javaObj, f, o)) {
@@ -168,13 +171,16 @@ static jshort Field_getShort(JNIEnv* env, jobject javaField, jobject javaObj) {
   return GetPrimitiveField(env, javaField, javaObj, 'S').GetS();
 }
 
-static void SetFieldValue(mirror::Object* o, mirror::ArtField* f, const JValue& new_value,
-                          bool allow_references)
+static void SetFieldValue(ScopedFastNativeObjectAccess& soa, mirror::Object* o,
+                          mirror::ArtField* f, const JValue& new_value, bool allow_references)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(f->GetDeclaringClass(),
-                                                               true, true)) {
+  CHECK(!kMovingFields);
+  SirtRef<mirror::Object> sirt_obj(soa.Self(), o);
+  SirtRef<mirror::Class> sirt_klass(soa.Self(), f->GetDeclaringClass());
+  if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(sirt_klass, true, true)) {
     return;
   }
+  o = sirt_obj.get();
   switch (FieldHelper(f).GetTypeAsPrimitiveType()) {
   case Primitive::kPrimBoolean:
     f->SetBoolean(o, new_value.GetZ());
@@ -216,12 +222,12 @@ static void SetFieldValue(mirror::Object* o, mirror::ArtField* f, const JValue& 
   // Special handling for final fields on SMP systems.
   // We need a store/store barrier here (JMM requirement).
   if (f->IsFinal()) {
-    ANDROID_MEMBAR_STORE();
+    QuasiAtomic::MembarStoreLoad();
   }
 }
 
 static void Field_set(JNIEnv* env, jobject javaField, jobject javaObj, jobject javaValue) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   mirror::ArtField* f = soa.DecodeField(env->FromReflectedField(javaField));
 
   // Unbox the value, if necessary.
@@ -237,12 +243,12 @@ static void Field_set(JNIEnv* env, jobject javaField, jobject javaObj, jobject j
     return;
   }
 
-  SetFieldValue(o, f, unboxed_value, true);
+  SetFieldValue(soa, o, f, unboxed_value, true);
 }
 
 static void SetPrimitiveField(JNIEnv* env, jobject javaField, jobject javaObj, char src_descriptor,
                               const JValue& new_value) {
-  ScopedObjectAccess soa(env);
+  ScopedFastNativeObjectAccess soa(env);
   mirror::ArtField* f = soa.DecodeField(env->FromReflectedField(javaField));
   mirror::Object* o = NULL;
   if (!CheckReceiver(soa, javaObj, f, o)) {
@@ -264,7 +270,7 @@ static void SetPrimitiveField(JNIEnv* env, jobject javaField, jobject javaObj, c
   }
 
   // Write the value.
-  SetFieldValue(o, f, wide_value, false);
+  SetFieldValue(soa, o, f, wide_value, false);
 }
 
 static void Field_setBoolean(JNIEnv* env, jobject javaField, jobject javaObj, jboolean z) {
@@ -316,24 +322,24 @@ static void Field_setShort(JNIEnv* env, jobject javaField, jobject javaObj, jsho
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Field, get,        "(Ljava/lang/Object;)Ljava/lang/Object;"),
-  NATIVE_METHOD(Field, getBoolean, "(Ljava/lang/Object;)Z"),
-  NATIVE_METHOD(Field, getByte,    "(Ljava/lang/Object;)B"),
-  NATIVE_METHOD(Field, getChar,    "(Ljava/lang/Object;)C"),
-  NATIVE_METHOD(Field, getDouble,  "(Ljava/lang/Object;)D"),
-  NATIVE_METHOD(Field, getFloat,   "(Ljava/lang/Object;)F"),
-  NATIVE_METHOD(Field, getInt,     "(Ljava/lang/Object;)I"),
-  NATIVE_METHOD(Field, getLong,    "(Ljava/lang/Object;)J"),
-  NATIVE_METHOD(Field, getShort,   "(Ljava/lang/Object;)S"),
-  NATIVE_METHOD(Field, set,        "(Ljava/lang/Object;Ljava/lang/Object;)V"),
-  NATIVE_METHOD(Field, setBoolean, "(Ljava/lang/Object;Z)V"),
-  NATIVE_METHOD(Field, setByte,    "(Ljava/lang/Object;B)V"),
-  NATIVE_METHOD(Field, setChar,    "(Ljava/lang/Object;C)V"),
-  NATIVE_METHOD(Field, setDouble,  "(Ljava/lang/Object;D)V"),
-  NATIVE_METHOD(Field, setFloat,   "(Ljava/lang/Object;F)V"),
-  NATIVE_METHOD(Field, setInt,     "(Ljava/lang/Object;I)V"),
-  NATIVE_METHOD(Field, setLong,    "(Ljava/lang/Object;J)V"),
-  NATIVE_METHOD(Field, setShort,   "(Ljava/lang/Object;S)V"),
+  NATIVE_METHOD(Field, get,        "!(Ljava/lang/Object;)Ljava/lang/Object;"),
+  NATIVE_METHOD(Field, getBoolean, "!(Ljava/lang/Object;)Z"),
+  NATIVE_METHOD(Field, getByte,    "!(Ljava/lang/Object;)B"),
+  NATIVE_METHOD(Field, getChar,    "!(Ljava/lang/Object;)C"),
+  NATIVE_METHOD(Field, getDouble,  "!(Ljava/lang/Object;)D"),
+  NATIVE_METHOD(Field, getFloat,   "!(Ljava/lang/Object;)F"),
+  NATIVE_METHOD(Field, getInt,     "!(Ljava/lang/Object;)I"),
+  NATIVE_METHOD(Field, getLong,    "!(Ljava/lang/Object;)J"),
+  NATIVE_METHOD(Field, getShort,   "!(Ljava/lang/Object;)S"),
+  NATIVE_METHOD(Field, set,        "!(Ljava/lang/Object;Ljava/lang/Object;)V"),
+  NATIVE_METHOD(Field, setBoolean, "!(Ljava/lang/Object;Z)V"),
+  NATIVE_METHOD(Field, setByte,    "!(Ljava/lang/Object;B)V"),
+  NATIVE_METHOD(Field, setChar,    "!(Ljava/lang/Object;C)V"),
+  NATIVE_METHOD(Field, setDouble,  "!(Ljava/lang/Object;D)V"),
+  NATIVE_METHOD(Field, setFloat,   "!(Ljava/lang/Object;F)V"),
+  NATIVE_METHOD(Field, setInt,     "!(Ljava/lang/Object;I)V"),
+  NATIVE_METHOD(Field, setLong,    "!(Ljava/lang/Object;J)V"),
+  NATIVE_METHOD(Field, setShort,   "!(Ljava/lang/Object;S)V"),
 };
 
 void register_java_lang_reflect_Field(JNIEnv* env) {

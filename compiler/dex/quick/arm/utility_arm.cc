@@ -22,14 +22,14 @@ namespace art {
 
 /* This file contains codegen for the Thumb ISA. */
 
-static int EncodeImmSingle(int value) {
-  int res;
-  int bit_a =  (value & 0x80000000) >> 31;
-  int not_bit_b = (value & 0x40000000) >> 30;
-  int bit_b =  (value & 0x20000000) >> 29;
-  int b_smear =  (value & 0x3e000000) >> 25;
-  int slice =   (value & 0x01f80000) >> 19;
-  int zeroes =  (value & 0x0007ffff);
+static int32_t EncodeImmSingle(int32_t value) {
+  int32_t res;
+  int32_t bit_a =  (value & 0x80000000) >> 31;
+  int32_t not_bit_b = (value & 0x40000000) >> 30;
+  int32_t bit_b =  (value & 0x20000000) >> 29;
+  int32_t b_smear =  (value & 0x3e000000) >> 25;
+  int32_t slice =   (value & 0x01f80000) >> 19;
+  int32_t zeroes =  (value & 0x0007ffff);
   if (zeroes != 0)
     return -1;
   if (bit_b) {
@@ -47,15 +47,15 @@ static int EncodeImmSingle(int value) {
  * Determine whether value can be encoded as a Thumb2 floating point
  * immediate.  If not, return -1.  If so return encoded 8-bit value.
  */
-static int EncodeImmDouble(int64_t value) {
-  int res;
-  int bit_a = (value & 0x8000000000000000ll) >> 63;
-  int not_bit_b = (value & 0x4000000000000000ll) >> 62;
-  int bit_b = (value & 0x2000000000000000ll) >> 61;
-  int b_smear = (value & 0x3fc0000000000000ll) >> 54;
-  int slice =  (value & 0x003f000000000000ll) >> 48;
+static int32_t EncodeImmDouble(int64_t value) {
+  int32_t res;
+  int32_t bit_a = (value & 0x8000000000000000ll) >> 63;
+  int32_t not_bit_b = (value & 0x4000000000000000ll) >> 62;
+  int32_t bit_b = (value & 0x2000000000000000ll) >> 61;
+  int32_t b_smear = (value & 0x3fc0000000000000ll) >> 54;
+  int32_t slice =  (value & 0x003f000000000000ll) >> 48;
   uint64_t zeroes = (value & 0x0000ffffffffffffll);
-  if (zeroes != 0)
+  if (zeroes != 0ull)
     return -1;
   if (bit_b) {
     if ((not_bit_b != 0) || (b_smear != 0xff))
@@ -90,15 +90,14 @@ LIR* ArmMir2Lir::LoadFPConstantValue(int r_dest, int value) {
   LIR* load_pc_rel = RawLIR(current_dalvik_offset_, kThumb2Vldrs,
                           r_dest, r15pc, 0, 0, 0, data_target);
   SetMemRefType(load_pc_rel, true, kLiteral);
-  load_pc_rel->alias_info = reinterpret_cast<uintptr_t>(data_target);
   AppendLIR(load_pc_rel);
   return load_pc_rel;
 }
 
 static int LeadingZeros(uint32_t val) {
   uint32_t alt;
-  int n;
-  int count;
+  int32_t n;
+  int32_t count;
 
   count = 16;
   n = 32;
@@ -118,8 +117,8 @@ static int LeadingZeros(uint32_t val) {
  * immediate.  If not, return -1.  If so, return i:imm3:a:bcdefgh form.
  */
 int ArmMir2Lir::ModifiedImmediate(uint32_t value) {
-  int z_leading;
-  int z_trailing;
+  int32_t z_leading;
+  int32_t z_trailing;
   uint32_t b0 = value & 0xff;
 
   /* Note: case of value==0 must use 0:000:0:0000000 encoding */
@@ -185,12 +184,12 @@ LIR* ArmMir2Lir::LoadConstantNoClobber(int r_dest, int value) {
   /* Check Modified immediate special cases */
   mod_imm = ModifiedImmediate(value);
   if (mod_imm >= 0) {
-    res = NewLIR2(kThumb2MovImmShift, r_dest, mod_imm);
+    res = NewLIR2(kThumb2MovI8M, r_dest, mod_imm);
     return res;
   }
   mod_imm = ModifiedImmediate(~value);
   if (mod_imm >= 0) {
-    res = NewLIR2(kThumb2MvnImm12, r_dest, mod_imm);
+    res = NewLIR2(kThumb2MvnI8M, r_dest, mod_imm);
     return res;
   }
   /* 16-bit immediate? */
@@ -211,6 +210,9 @@ LIR* ArmMir2Lir::OpUnconditionalBranch(LIR* target) {
 }
 
 LIR* ArmMir2Lir::OpCondBranch(ConditionCode cc, LIR* target) {
+  // This is kThumb2BCond instead of kThumbBCond for performance reasons. The assembly
+  // time required for a new pass after kThumbBCond is fixed up to kThumb2BCond is
+  // substantial.
   LIR* branch = NewLIR2(kThumb2BCond, 0 /* offset to be patched */,
                         ArmConditionEncoding(cc));
   branch->target = target;
@@ -315,6 +317,22 @@ LIR* ArmMir2Lir::OpRegRegShift(OpKind op, int r_dest_src1, int r_src2,
     case kOpSub:
       opcode = (thumb_form) ? kThumbSubRRR : kThumb2SubRRR;
       break;
+    case kOpRev:
+      DCHECK_EQ(shift, 0);
+      if (!thumb_form) {
+        // Binary, but rm is encoded twice.
+        return NewLIR3(kThumb2RevRR, r_dest_src1, r_src2, r_src2);
+      }
+      opcode = kThumbRev;
+      break;
+    case kOpRevsh:
+      DCHECK_EQ(shift, 0);
+      if (!thumb_form) {
+        // Binary, but rm is encoded twice.
+        return NewLIR3(kThumb2RevshRR, r_dest_src1, r_src2, r_src2);
+      }
+      opcode = kThumbRevsh;
+      break;
     case kOp2Byte:
       DCHECK_EQ(shift, 0);
       return NewLIR4(kThumb2Sbfx, r_dest_src1, r_src2, 0, 8);
@@ -328,7 +346,7 @@ LIR* ArmMir2Lir::OpRegRegShift(OpKind op, int r_dest_src1, int r_src2,
       LOG(FATAL) << "Bad opcode: " << op;
       break;
   }
-  DCHECK_GE(static_cast<int>(opcode), 0);
+  DCHECK(!IsPseudoLirOp(opcode));
   if (EncodingMap[opcode].flags & IS_BINARY_OP) {
     return NewLIR2(opcode, r_dest_src1, r_src2);
   } else if (EncodingMap[opcode].flags & IS_TERTIARY_OP) {
@@ -347,6 +365,11 @@ LIR* ArmMir2Lir::OpRegRegShift(OpKind op, int r_dest_src1, int r_src2,
 
 LIR* ArmMir2Lir::OpRegReg(OpKind op, int r_dest_src1, int r_src2) {
   return OpRegRegShift(op, r_dest_src1, r_src2, 0);
+}
+
+LIR* ArmMir2Lir::OpCondRegReg(OpKind op, ConditionCode cc, int r_dest, int r_src) {
+  LOG(FATAL) << "Unexpected use of OpCondRegReg for Arm";
+  return NULL;
 }
 
 LIR* ArmMir2Lir::OpRegRegRegShift(OpKind op, int r_dest, int r_src1,
@@ -380,6 +403,10 @@ LIR* ArmMir2Lir::OpRegRegRegShift(OpKind op, int r_dest, int r_src1,
       DCHECK_EQ(shift, 0);
       opcode = kThumb2MulRRR;
       break;
+    case kOpDiv:
+      DCHECK_EQ(shift, 0);
+      opcode = kThumb2SdivRRR;
+      break;
     case kOpOr:
       opcode = kThumb2OrrRRR;
       break;
@@ -406,7 +433,7 @@ LIR* ArmMir2Lir::OpRegRegRegShift(OpKind op, int r_dest, int r_src1,
       LOG(FATAL) << "Bad opcode: " << op;
       break;
   }
-  DCHECK_GE(static_cast<int>(opcode), 0);
+  DCHECK(!IsPseudoLirOp(opcode));
   if (EncodingMap[opcode].flags & IS_QUAD_OP) {
     return NewLIR4(opcode, r_dest, r_src1, r_src2, shift);
   } else {
@@ -422,12 +449,11 @@ LIR* ArmMir2Lir::OpRegRegReg(OpKind op, int r_dest, int r_src1, int r_src2) {
 LIR* ArmMir2Lir::OpRegRegImm(OpKind op, int r_dest, int r_src1, int value) {
   LIR* res;
   bool neg = (value < 0);
-  int abs_value = (neg) ? -value : value;
+  int32_t abs_value = (neg) ? -value : value;
   ArmOpcode opcode = kThumbBkpt;
   ArmOpcode alt_opcode = kThumbBkpt;
   bool all_low_regs = (ARM_LOWREG(r_dest) && ARM_LOWREG(r_src1));
-  int mod_imm = ModifiedImmediate(value);
-  int mod_imm_neg = ModifiedImmediate(-value);
+  int32_t mod_imm = ModifiedImmediate(value);
 
   switch (op) {
     case kOpLsl:
@@ -463,47 +489,55 @@ LIR* ArmMir2Lir::OpRegRegImm(OpKind op, int r_dest, int r_src1, int value) {
         else
           opcode = (neg) ? kThumbAddRRI3 : kThumbSubRRI3;
         return NewLIR3(opcode, r_dest, r_src1, abs_value);
-      } else if ((abs_value & 0xff) == abs_value) {
+      } else if ((abs_value & 0x3ff) == abs_value) {
         if (op == kOpAdd)
           opcode = (neg) ? kThumb2SubRRI12 : kThumb2AddRRI12;
         else
           opcode = (neg) ? kThumb2AddRRI12 : kThumb2SubRRI12;
         return NewLIR3(opcode, r_dest, r_src1, abs_value);
       }
-      if (mod_imm_neg >= 0) {
-        op = (op == kOpAdd) ? kOpSub : kOpAdd;
-        mod_imm = mod_imm_neg;
+      if (mod_imm < 0) {
+        mod_imm = ModifiedImmediate(-value);
+        if (mod_imm >= 0) {
+          op = (op == kOpAdd) ? kOpSub : kOpAdd;
+        }
       }
       if (op == kOpSub) {
-        opcode = kThumb2SubRRI8;
+        opcode = kThumb2SubRRI8M;
         alt_opcode = kThumb2SubRRR;
       } else {
-        opcode = kThumb2AddRRI8;
+        opcode = kThumb2AddRRI8M;
         alt_opcode = kThumb2AddRRR;
       }
       break;
     case kOpRsub:
-      opcode = kThumb2RsubRRI8;
+      opcode = kThumb2RsubRRI8M;
       alt_opcode = kThumb2RsubRRR;
       break;
     case kOpAdc:
-      opcode = kThumb2AdcRRI8;
+      opcode = kThumb2AdcRRI8M;
       alt_opcode = kThumb2AdcRRR;
       break;
     case kOpSbc:
-      opcode = kThumb2SbcRRI8;
+      opcode = kThumb2SbcRRI8M;
       alt_opcode = kThumb2SbcRRR;
       break;
     case kOpOr:
-      opcode = kThumb2OrrRRI8;
+      opcode = kThumb2OrrRRI8M;
       alt_opcode = kThumb2OrrRRR;
       break;
     case kOpAnd:
-      opcode = kThumb2AndRRI8;
+      if (mod_imm < 0) {
+        mod_imm = ModifiedImmediate(~value);
+        if (mod_imm >= 0) {
+          return NewLIR3(kThumb2BicRRI8M, r_dest, r_src1, mod_imm);
+        }
+      }
+      opcode = kThumb2AndRRI8M;
       alt_opcode = kThumb2AndRRR;
       break;
     case kOpXor:
-      opcode = kThumb2EorRRI8;
+      opcode = kThumb2EorRRI8M;
       alt_opcode = kThumb2EorRRR;
       break;
     case kOpMul:
@@ -512,15 +546,19 @@ LIR* ArmMir2Lir::OpRegRegImm(OpKind op, int r_dest, int r_src1, int value) {
       alt_opcode = kThumb2MulRRR;
       break;
     case kOpCmp: {
-      int mod_imm = ModifiedImmediate(value);
       LIR* res;
       if (mod_imm >= 0) {
-        res = NewLIR2(kThumb2CmpRI12, r_src1, mod_imm);
+        res = NewLIR2(kThumb2CmpRI8M, r_src1, mod_imm);
       } else {
-        int r_tmp = AllocTemp();
-        res = LoadConstant(r_tmp, value);
-        OpRegReg(kOpCmp, r_src1, r_tmp);
-        FreeTemp(r_tmp);
+        mod_imm = ModifiedImmediate(-value);
+        if (mod_imm >= 0) {
+          res = NewLIR2(kThumb2CmnRI8M, r_src1, mod_imm);
+        } else {
+          int r_tmp = AllocTemp();
+          res = LoadConstant(r_tmp, value);
+          OpRegReg(kOpCmp, r_src1, r_tmp);
+          FreeTemp(r_tmp);
+        }
       }
       return res;
     }
@@ -545,7 +583,7 @@ LIR* ArmMir2Lir::OpRegRegImm(OpKind op, int r_dest, int r_src1, int value) {
 /* Handle Thumb-only variants here - otherwise punt to OpRegRegImm */
 LIR* ArmMir2Lir::OpRegImm(OpKind op, int r_dest_src1, int value) {
   bool neg = (value < 0);
-  int abs_value = (neg) ? -value : value;
+  int32_t abs_value = (neg) ? -value : value;
   bool short_form = (((abs_value & 0xff) == abs_value) && ARM_LOWREG(r_dest_src1));
   ArmOpcode opcode = kThumbBkpt;
   switch (op) {
@@ -566,13 +604,10 @@ LIR* ArmMir2Lir::OpRegImm(OpKind op, int r_dest_src1, int value) {
       }
       break;
     case kOpCmp:
-      if (ARM_LOWREG(r_dest_src1) && short_form) {
-        opcode = (short_form) ?  kThumbCmpRI8 : kThumbCmpRR;
-      } else if (ARM_LOWREG(r_dest_src1)) {
-        opcode = kThumbCmpRR;
+      if (!neg && short_form) {
+        opcode = kThumbCmpRI8;
       } else {
         short_form = false;
-        opcode = kThumbCmpHL;
       }
       break;
     default:
@@ -626,7 +661,6 @@ LIR* ArmMir2Lir::LoadConstantWide(int r_dest_lo, int r_dest_hi, int64_t value) {
                    r_dest_lo, r_dest_hi, r15pc, 0, 0, data_target);
     }
     SetMemRefType(res, true, kLiteral);
-    res->alias_info = reinterpret_cast<uintptr_t>(data_target);
     AppendLIR(res);
   }
   return res;
